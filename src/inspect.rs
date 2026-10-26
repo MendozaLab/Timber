@@ -27,6 +27,10 @@ pub fn paths(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
         .filter(|p| !p.is_empty())
         .map(|p| {
             let path = String::from_utf8(p.to_vec()).context("non-UTF-8 path unsupported")?;
+            // ls-files may return a terminal slash for a collapsed directory
+            // (including an ignored nested repository). Remove only that marker;
+            // every remaining component still passes the normal strict validator.
+            let path = path.strip_suffix('/').unwrap_or(&path).to_owned();
             fsx::validate_relative(&path)?;
             Ok(path)
         })
@@ -68,7 +72,9 @@ fn file_info(root: &Path, path: &str) -> Value {
         Ok(m) => {
             json!({"path":path,"bytes":m.len(),"kind":if m.file_type().is_symlink(){"symlink"}else if m.is_dir(){"directory"}else if m.is_file(){"file"}else{"unsupported_special_file"},"cloud_placeholder":fsx::is_placeholder(&m)})
         }
-        Err(e) => json!({"path":path,"error":e.to_string()}),
+        Err(e) => {
+            json!({"path":path,"kind":"metadata_unavailable","status":"unknown","error":e.to_string()})
+        }
     }
 }
 
@@ -172,6 +178,23 @@ pub fn worktree(path: &Path) -> Result<Value> {
             "-z",
         ],
     )?;
+    let untracked = untracked
+        .iter()
+        .map(|p| file_info(path, p))
+        .collect::<Vec<_>>();
+    let ignored = ignored
+        .iter()
+        .map(|p| file_info(path, p))
+        .collect::<Vec<_>>();
+    let unknown_metadata = untracked
+        .iter()
+        .chain(&ignored)
+        .filter(|row| row["kind"] == "metadata_unavailable")
+        .map(|row| row["path"].clone())
+        .collect::<Vec<_>>();
+    if !unknown_metadata.is_empty() {
+        blockers.push("Some untracked/ignored metadata became unavailable during inspection; those entries remain unknown.".into());
+    }
     let head_after = git::text(path, &["rev-parse", "--verify", "HEAD"])?;
     let index_after = self::index(path)?;
     let git_identity_stable = head == head_after && index == index_after;
@@ -181,10 +204,9 @@ pub fn worktree(path: &Path) -> Result<Value> {
         );
     }
     Ok(json!({
-        "path":path,"kind":"registered_worktree","inspection_status":if unknown.is_empty() && git_identity_stable {"scanned"}else{"partial"},
+        "path":path,"kind":"registered_worktree","inspection_status":if unknown.is_empty() && unknown_metadata.is_empty() && git_identity_stable {"scanned"}else{"partial"},
         "head":head,"staged_paths":staged,"working_paths":working,"unknown_working_paths":unknown,
-        "untracked":untracked.iter().map(|p|file_info(path,p)).collect::<Vec<_>>(),
-        "ignored":ignored.iter().map(|p|file_info(path,p)).collect::<Vec<_>>(),
+        "untracked":untracked,"ignored":ignored,"unknown_metadata_paths":unknown_metadata,
         "blockers":blockers,"git_identity_stable":git_identity_stable,"writer_exclusion_enforced":false,
         "statistics":{"index_paths":index.len(),"git_blob_objects_requested":requested.len(),"unique_index_blob_objects":unique_count,"cat_file_batch_processes":usize::from(!requested.is_empty()),"working_files_compared":compared,"elapsed_seconds":started.elapsed().as_secs_f64()},
         "note":"Working differences compare raw bytes without clean filters or index refresh. Per-file stable reads and unchanged HEAD/index do not establish a frozen snapshot or permission to clean up."

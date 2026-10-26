@@ -87,6 +87,9 @@ fn expected(value: Option<&Value>) -> Result<Option<ExpectedFile>> {
         .or_else(|| value.get("kind"))
         .and_then(Value::as_str)
         .unwrap_or("file");
+    // The structural receipt format uses "regular" for ordinary files.
+    // Normalize this one documented spelling; canonical maps keep their strict enum.
+    let kind = if kind == "regular" { "file" } else { kind };
     ensure!(
         valid_digest(sha) && mode <= 0o777,
         "invalid expected file fingerprint"

@@ -278,3 +278,80 @@ fn target_symlink_ancestor_is_not_followed_for_comparison() {
     );
     assert!(!result.to_string().contains("external fixture contents"));
 }
+
+#[test]
+fn structural_receipts_normalize_only_regular_file_spelling() {
+    let (_d, r, f, _) = stash_fixture();
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(f.join("receipt.json")).unwrap()).unwrap();
+    for fingerprint in value["results"][0]["before"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        fingerprint["type"] = json!("regular");
+    }
+    receipt(&f, &value);
+    let result = recovery::analyze_folder(&r, &f, true).unwrap();
+    assert!(result["blockers"].as_array().unwrap().is_empty());
+    assert_eq!(result["summary"]["absent_at_proposed_path"], 1);
+    assert_eq!(result["git_dependencies"][0]["status"], "matched");
+    let map = recovery::map_from_receipt(&f).unwrap().unwrap();
+    assert_eq!(
+        map.git_dependencies[0].expected_files["notes.txt"].kind,
+        "file"
+    );
+
+    let single = f.join("single");
+    fs::create_dir(&single).unwrap();
+    write(&single, "notes.txt", b"current main\n");
+    let mut fingerprint = metadata(b"current main\n");
+    fingerprint["type"] = json!("regular");
+    receipt(&single, &json!({"source_before":{"notes.txt":fingerprint}}));
+    let result = recovery::analyze_folder(&r, &single, true).unwrap();
+    assert_eq!(result["summary"]["same_path_identical"], 1);
+    assert_eq!(result["payload_rows"][0]["receipt_match"], "matched");
+}
+
+#[test]
+fn regular_alias_does_not_accept_unknown_kinds_or_unsafe_paths() {
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path().join("repo");
+    repo(&r);
+    let f = d.path().join("saved");
+    fs::create_dir(&f).unwrap();
+    write(&f, "notes.txt", b"saved");
+    for unknown in ["socket", "REGULAR", "Regular", "regular-file"] {
+        let mut fingerprint = metadata(b"saved");
+        fingerprint["type"] = json!(unknown);
+        receipt(&f, &json!({"source_before":{"notes.txt":fingerprint}}));
+        assert!(recovery::map_from_receipt(&f).is_err());
+        let result = recovery::analyze_folder(&r, &f, true).unwrap();
+        assert!(!result["blockers"].as_array().unwrap().is_empty());
+        assert_eq!(result["summary"]["unmapped"], 1);
+    }
+    let mut fingerprint = metadata(b"saved");
+    fingerprint["type"] = json!("regular");
+    receipt(&f, &json!({"source_before":{"../outside":fingerprint}}));
+    assert!(recovery::map_from_receipt(&f).is_err());
+}
+
+#[test]
+fn symlink_receipt_kind_still_compares_link_data_without_following_target() {
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path().join("repo");
+    repo(&r);
+    let f = d.path().join("saved");
+    fs::create_dir(&f).unwrap();
+    std::os::unix::fs::symlink("absent-target", f.join("link")).unwrap();
+    std::os::unix::fs::symlink("absent-target", r.join("link")).unwrap();
+    receipt(
+        &f,
+        &json!({"source_before":{"link":{"type":"symlink","mode":511,"bytes":13,"sha256":fsx::digest(b"absent-target")}}}),
+    );
+    let result = recovery::analyze_folder(&r, &f, true).unwrap();
+    assert_eq!(result["summary"]["same_path_identical"], 1);
+    assert_eq!(result["payload_rows"][0]["receipt_match"], "matched");
+    assert!(!f.join("absent-target").exists());
+    assert!(!r.join("absent-target").exists());
+}

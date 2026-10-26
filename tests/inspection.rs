@@ -224,3 +224,51 @@ fn repository_subdirectory_keeps_folder_targets_relative_to_worktree_root() {
         serde_json::to_value(repo.canonicalize().unwrap()).unwrap()
     );
 }
+
+#[test]
+fn ignored_nested_git_directory_markers_are_listed_without_traversal_or_capture() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = temp.path().join("repo");
+    init(&repo);
+    fs::write(repo.join(".gitignore"), "nested-cache/\n").unwrap();
+    git::run(&repo, &["add", ".gitignore"]).unwrap();
+    git::run(&repo, &["commit", "-qm", "ignore local cache"]).unwrap();
+    let nested = repo.join("nested-cache");
+    fs::create_dir(&nested).unwrap();
+    git::init(&nested).unwrap();
+    fs::write(nested.join("payload.txt"), "contents not inspected\n").unwrap();
+    let raw = git::run(
+        &repo,
+        &[
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ],
+    )
+    .unwrap();
+    assert!(
+        raw.split(|b| *b == 0)
+            .any(|record| record == b"nested-cache/")
+    );
+    let before = fs::read(repo.join(".git/index")).unwrap();
+    let nested_config = fs::read(nested.join(".git/config")).unwrap();
+    let result = inspect::inspect(&repo, &[]).unwrap();
+    assert_eq!(result["status"], "complete");
+    assert_eq!(result["worktrees"][0]["inspection_status"], "scanned");
+    let ignored = result["worktrees"][0]["ignored"].as_array().unwrap();
+    let directory = ignored
+        .iter()
+        .find(|row| row["path"] == "nested-cache")
+        .expect("directory marker remains visible");
+    assert_eq!(directory["kind"], "directory");
+    assert!(
+        !ignored
+            .iter()
+            .any(|row| row["path"] == "nested-cache/payload.txt")
+    );
+    assert!(directory.get("sha256").is_none());
+    assert_eq!(before, fs::read(repo.join(".git/index")).unwrap());
+    assert_eq!(nested_config, fs::read(nested.join(".git/config")).unwrap());
+}
