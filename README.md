@@ -47,6 +47,17 @@ timber inspect --repo /path/to/project \
   --folder /path/to/saved-work --compare-folders
 ```
 
+With `--compare-folders`, read the findings as follows:
+
+| Finding | What it means |
+|---|---|
+| Identical at the same path | Matching content and recorded file properties; no competing version to merge at that path. |
+| Different at the same path | A competing version to retain and review; neither version is automatically better. |
+| Absent at the proposed path | A candidate addition; equivalent work may exist elsewhere. |
+| Unresolved Git dependency | Saved tracked work still depends on Git data that needs explicit verification and capture. |
+
+An exact match never authorizes deletion. Timber compares supported file content, including code, documents, and media; it does not make semantic or editorial selections.
+
 ## Preserve, verify, and preview
 
 In this example, `project/` and `agent-navigation/` are related worktrees. Run from their parent directory. Choose a store outside every source repository, preferably on another physical device if you need independent backup. The preview destination must also be outside every source.
@@ -73,14 +84,18 @@ timber --store ./timber-store assess plan.json
 
 `TARGET_ID` and `SOURCE_ID` are placeholders for real checkpoint IDs printed by your run. A plan selects one layer per source: committed, staged, or working. Untracked and ignored additions require explicit selection for integration. The [user guide](docs/USER-GUIDE.md) explains these selections, recovery-folder mappings, and structured reports.
 
+Preview construction does not run your project's code, builds, tests, hooks, or provider calls. Applying selected changes and deciding what to clean up remain separate actions.
+
 ## Review visually
 
 Commands can emit structured JSON for local automation. Save a result and render it into a self-contained HTML file:
 
 ```sh
 timber --store ./timber-store --json assess plan.json > assessment.json
-timber report assessment.json --to report.html
+timber --store ./timber-store report assessment.json --to report.html
 ```
+
+Use the same checkpoint store when rendering a source-bound report.
 
 Open `report.html` in a browser. It uses no scripts, remote assets, or local server. Paths, filenames, and errors remain data rather than executable markup. Review reports before sharing: they can reveal private project names and filenames.
 

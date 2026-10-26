@@ -6,6 +6,8 @@ Timber helps you review and consolidate work without changing the original workt
 
 `--store PATH` selects the local checkpoint store. Use a location outside every captured source and preview. A same-disk store does not protect against disk loss. New store directories use owner-only permissions; an existing custom store must be owned by the current user with mode `0700`.
 
+The preservation and preview examples below consistently use `--store ./timber-store`. Choose your own location and use it throughout the workflow.
+
 `--json` emits a structured result rather than the terminal view. Treat saved JSON and HTML reports as private until reviewed: they can contain source paths and filenames.
 
 Restoration and preview destinations must be new directories. Timber refuses existing destinations and paths nested inside captured sources.
@@ -44,7 +46,7 @@ Keep these classes separate:
 ## 2. Preserve selected state
 
 ```sh
-timber checkpoint ./agent-navigation --include-ignored assets/diagram.png
+timber --store ./timber-store checkpoint ./agent-navigation --include-ignored assets/diagram.png
 ```
 
 A worktree checkpoint preserves committed history, the logical staged index, current tracked files, untracked files, and selected ignored paths. Ignored omissions are listed explicitly.
@@ -54,7 +56,7 @@ A worktree checkpoint preserves committed history, the logical staged index, cur
 Pause your writers when possible. `--writers-paused` records your declaration; it does not enforce a lock against editors or agents. Matching capture scans establish observed stability, not proof that no concurrent write occurred.
 
 ```sh
-timber import ./saved-work --map ./folder-map.json
+timber --store ./timber-store import ./saved-work --map ./folder-map.json
 ```
 
 A folder import captures the supported files present now. It does not synthesize the former repository's commit, index, or complete history. See [the mapping example](../examples/import-map.json) for a public schema that declares source groups, selected destination paths, and Git dependencies. Without an explicit dependency repository, dependencies remain unresolved declarations; a receipt's success flag does not establish recovery.
@@ -63,7 +65,7 @@ Inspection understands the canonical `import-map.json` and supported file-manife
 
 ```sh
 # Preserve declared Git dependencies from an explicitly selected repository.
-timber import ./saved-work --map ./folder-map.json \
+timber --store ./timber-store import ./saved-work --map ./folder-map.json \
   --dependency-repo ./project
 ```
 
@@ -72,13 +74,13 @@ Dependency declarations pin a commit identity and may additionally pin its refer
 ## 3. Verify and restore
 
 ```sh
-timber checkpoints list
-timber checkpoints show CHECKPOINT_ID
-timber verify CHECKPOINT_ID
-timber restore CHECKPOINT_ID --to ./restored-copy
+timber --store ./timber-store checkpoints list
+timber --store ./timber-store checkpoints show CHECKPOINT_ID
+timber --store ./timber-store verify CHECKPOINT_ID
+timber --store ./timber-store restore CHECKPOINT_ID --to ./restored-copy
 
 # Reconstruct a captured saved Git group separately from the loose folder files.
-timber restore-git CHECKPOINT_ID --group saved-agent --to ./restored-git-copy
+timber --store ./timber-store restore-git CHECKPOINT_ID --group saved-agent --to ./restored-git-copy
 ```
 
 Verification reconstructs into an isolated temporary destination and compares it. Restore reconstructs into a new destination you choose. Neither operation executes hooks, filters, builds, dependency installation, or project code.
@@ -92,7 +94,7 @@ A successful result covers the supported state in that checkpoint. Excluded file
 Checkpoint the target too, including any unfinished target changes. Then prepare an ordered plan:
 
 ```sh
-timber plan --target TARGET_ID --source FIRST_SOURCE_ID \
+timber --store ./timber-store plan --target TARGET_ID --source FIRST_SOURCE_ID \
   --source SECOND_SOURCE_ID --out plan.json
 ```
 
@@ -115,7 +117,7 @@ Folder imports need explicit source-to-target mappings for preview contributions
 ## 5. Build the separate preview
 
 ```sh
-timber preview plan.json --to ./review-preview
+timber --store ./timber-store preview plan.json --to ./review-preview
 ```
 
 The preview has its own object store and generated Git configuration. It does not register another source worktree, borrow source object alternates, modify source branches, or fetch missing data.
@@ -127,9 +129,11 @@ Timber does not run the preview's project tests. Run your own review and tests d
 ## 6. Recheck before a human cleanup decision
 
 ```sh
-timber --json assess plan.json > assessment.json
-timber report assessment.json --to report.html
+timber --store ./timber-store --json assess plan.json > assessment.json
+timber --store ./timber-store report assessment.json --to report.html
 ```
+
+Use the same checkpoint store when rendering a source-bound report.
 
 Assessment rechecks original sources for drift and explains exclusions, retained alternatives, missing material, and other unresolved conditions. A reproducible old preview can remain useful while its cleanup assessment becomes stale.
 
