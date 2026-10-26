@@ -28,7 +28,39 @@ struct Description {
     map: ImportMap,
     mappings: BTreeMap<String, Mapping>,
     heads: BTreeMap<String, String>,
+    legacy_short_references: BTreeMap<String, String>,
     notes: Vec<String>,
+}
+
+fn receipt_reference(value: &str) -> Result<(String, Option<String>)> {
+    let short = !value.starts_with("refs/");
+    ensure!(
+        !value.is_empty()
+            && !value.starts_with('-')
+            && !value.ends_with('.')
+            && !value.contains("..")
+            && !value.contains("@{")
+            && !value
+                .chars()
+                .any(|ch| ch <= ' ' || ch == '\u{7f}' || "~^:?*[\\".contains(ch))
+            && value
+                .split('/')
+                .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock")),
+        "invalid legacy branch reference"
+    );
+    if short {
+        ensure!(
+            !(matches!(
+                value,
+                "HEAD" | "FETCH_HEAD" | "ORIG_HEAD" | "MERGE_HEAD" | "AUTO_MERGE"
+            ) || ([40, 64].contains(&value.len())
+                && value.bytes().all(|ch| ch.is_ascii_hexdigit()))),
+            "legacy reference is not an unambiguous branch path"
+        );
+        Ok((format!("refs/heads/{value}"), Some(value.into())))
+    } else {
+        Ok((value.into(), None))
+    }
 }
 
 fn read_metadata_json(folder: &Path, name: &str) -> Result<Value> {
@@ -146,6 +178,7 @@ fn empty_description(format: &'static str) -> Description {
         },
         mappings: BTreeMap::new(),
         heads: BTreeMap::new(),
+        legacy_short_references: BTreeMap::new(),
         notes: Vec::new(),
     }
 }
@@ -230,10 +263,20 @@ fn describe(folder: &Path) -> Result<Option<Description>> {
                         expected_files.insert(path.clone(), value);
                     }
                 }
+                let reference = group
+                    .get("ref")
+                    .and_then(Value::as_str)
+                    .map(receipt_reference)
+                    .transpose()?;
+                if let Some((_, Some(short))) = &reference {
+                    result
+                        .legacy_short_references
+                        .insert(label.into(), short.clone());
+                }
                 result.map.git_dependencies.push(GitDependency {
                     group: label.into(),
                     oid: oid.into(),
-                    reference: group.get("ref").and_then(Value::as_str).map(str::to_owned),
+                    reference: reference.map(|(reference, _)| reference),
                     kind: "stash".into(),
                     source_head: head,
                     tracked_paths: tracked,
@@ -442,7 +485,12 @@ fn commit_present(repo: &Path, oid: &str) -> bool {
     valid_oid(oid) && git::text(repo, &["cat-file", "-t", oid]).is_ok_and(|kind| kind == "commit")
 }
 
-fn analyze_dependency(repo: &Path, dependency: &GitDependency, compare: bool) -> Value {
+fn analyze_dependency(
+    repo: &Path,
+    dependency: &GitDependency,
+    compare: bool,
+    legacy_short: Option<&str>,
+) -> Value {
     let mut result = json!({"group":dependency.group,"oid":dependency.oid,"reference":dependency.reference,"kind":if dependency.kind.is_empty(){"commit"}else{&dependency.kind},"status":"unverified","object_available":false,"identity_matches":false,"receipt_hashes_verified":false,"self_contained_capture":false,"historical_completeness":"unknown","tracked_rows":[],"notes":["A present Git object is an external recovery dependency, not an independent backup or completed restoration."]});
     let analyze = || -> Result<Value> {
         ensure!(valid_oid(&dependency.oid), "invalid saved commit identity");
@@ -455,6 +503,43 @@ fn analyze_dependency(repo: &Path, dependency: &GitDependency, compare: bool) ->
             return Ok(result);
         }
         result["object_available"] = json!(true);
+        if let Some(short) = legacy_short {
+            let normalized = dependency
+                .reference
+                .as_deref()
+                .context("normalized branch reference missing")?;
+            let present =
+                git::output(repo, &["show-ref", "--verify", "--quiet", normalized], None)?;
+            if present.status.code() == Some(1) {
+                result["status"] = json!("reference_missing");
+                return Ok(result);
+            }
+            ensure!(
+                present.status.success(),
+                "could not inspect normalized branch reference"
+            );
+            let resolved = git::output(
+                repo,
+                &[
+                    "rev-parse",
+                    "--symbolic-full-name",
+                    "--verify",
+                    "--end-of-options",
+                    short,
+                ],
+                None,
+            )?;
+            if !resolved.status.success() {
+                result["status"] = json!("reference_missing");
+                return Ok(result);
+            }
+            let observed = std::str::from_utf8(&resolved.stdout)?.trim();
+            if !resolved.stderr.is_empty() || Some(observed) != dependency.reference.as_deref() {
+                result["status"] = json!("ambiguous_reference");
+                result["notes"].as_array_mut().unwrap().push(json!("Legacy short reference did not resolve uniquely to its declared branch; no namespace is guessed."));
+                return Ok(result);
+            }
+        }
         if let Some(reference) = &dependency.reference {
             ensure!(
                 reference.starts_with("refs/"),
@@ -699,7 +784,15 @@ pub fn analyze_folder(repo: &Path, folder: &Path, compare: bool) -> Result<Value
             );
         }
         for dependency in &description.map.git_dependencies {
-            dependencies.push(analyze_dependency(repo, dependency, compare));
+            dependencies.push(analyze_dependency(
+                repo,
+                dependency,
+                compare,
+                description
+                    .legacy_short_references
+                    .get(&dependency.group)
+                    .map(String::as_str),
+            ));
         }
     } else if !receipt_present {
         notes.push("No supported receipt was supplied. Relative saved paths are proposed target mappings only; original source lineage is unknown.".into());

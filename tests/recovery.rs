@@ -355,3 +355,76 @@ fn symlink_receipt_kind_still_compares_link_data_without_following_target() {
     assert!(!f.join("absent-target").exists());
     assert!(!r.join("absent-target").exists());
 }
+
+#[test]
+fn structural_short_branch_reference_is_qualified_and_pinned() {
+    let (_d, r, f, oid) = stash_fixture();
+    g(&r, &["update-ref", "refs/heads/recovery/agent-a", &oid]);
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(f.join("receipt.json")).unwrap()).unwrap();
+    value["results"][0]["ref"] = json!("recovery/agent-a");
+    receipt(&f, &value);
+    let before = g(&r, &["show-ref"]);
+    let map = recovery::map_from_receipt(&f).unwrap().unwrap();
+    assert_eq!(
+        map.git_dependencies[0].reference.as_deref(),
+        Some("refs/heads/recovery/agent-a")
+    );
+    let result = recovery::analyze_folder(&r, &f, true).unwrap();
+    assert!(result["blockers"].as_array().unwrap().is_empty());
+    assert_eq!(result["git_dependencies"][0]["status"], "matched");
+    assert_eq!(result["git_dependencies"][0]["identity_matches"], true);
+    assert_eq!(result["summary"]["absent_at_proposed_path"], 1);
+    assert_eq!(before, g(&r, &["show-ref"]));
+    value["results"][0]["ref"] = json!("refs/heads/recovery/agent-a");
+    receipt(&f, &value);
+    let map = recovery::map_from_receipt(&f).unwrap().unwrap();
+    assert_eq!(
+        map.git_dependencies[0].reference.as_deref(),
+        Some("refs/heads/recovery/agent-a")
+    );
+}
+
+#[test]
+fn ambiguous_or_missing_short_branch_references_do_not_erase_payload_analysis() {
+    let (_d, r, f, oid) = stash_fixture();
+    g(&r, &["update-ref", "refs/heads/recovery/agent-a", &oid]);
+    g(&r, &["update-ref", "refs/tags/recovery/agent-a", &oid]);
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(f.join("receipt.json")).unwrap()).unwrap();
+    value["results"][0]["ref"] = json!("recovery/agent-a");
+    receipt(&f, &value);
+    let result = recovery::analyze_folder(&r, &f, true).unwrap();
+    assert_eq!(
+        result["git_dependencies"][0]["status"],
+        "ambiguous_reference"
+    );
+    assert_eq!(result["git_dependencies"][0]["identity_matches"], false);
+    assert_eq!(result["summary"]["absent_at_proposed_path"], 1);
+    value["results"][0]["ref"] = json!("recovery/missing");
+    receipt(&f, &value);
+    let result = recovery::analyze_folder(&r, &f, true).unwrap();
+    assert_eq!(result["git_dependencies"][0]["status"], "reference_missing");
+    assert_eq!(result["summary"]["absent_at_proposed_path"], 1);
+}
+
+#[test]
+fn legacy_reference_alias_keeps_unsafe_expressions_and_canonical_short_refs_invalid() {
+    let (_d, _r, f, oid) = stash_fixture();
+    let mut value: Value =
+        serde_json::from_slice(&fs::read(f.join("receipt.json")).unwrap()).unwrap();
+    for unsafe_ref in [
+        "../bad",
+        "recovery/bad^{}",
+        "recovery//bad",
+        "recovery/bad.lock",
+        "HEAD",
+        &oid,
+    ] {
+        value["results"][0]["ref"] = json!(unsafe_ref);
+        receipt(&f, &value);
+        assert!(recovery::map_from_receipt(&f).is_err(), "{unsafe_ref}");
+    }
+    fs::write(f.join("import-map.json"),serde_json::to_vec(&json!({"schema":1,"git_dependencies":[{"group":"worker","oid":oid,"reference":"recovery/agent-a","kind":"stash"}]})).unwrap()).unwrap();
+    assert!(recovery::map_from_receipt(&f).is_err());
+}
