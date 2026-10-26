@@ -2,11 +2,13 @@
 
 **Untangle dirty worktrees. Keep the useful work.**
 
-See what changed across your Git worktrees, preserve unfinished work, and assemble a consolidation preview in a separate repository. Understand what remains before cleaning up.
+Timber helps developers recover unfinished work scattered across Git worktrees and saved folders. Inspect what changed, preserve staged and working versions separately, and assemble selected changes in an independent consolidation preview.
 
 Timber is for the moment when several worktrees contain useful changes and you can no longer confidently answer: *what is unique, what has already landed, and what can I safely put aside?*
 
-**Status: experimental 0.1.** macOS has been checked locally. Linux is a target with automated checks configured, but has not yet been run in this development record. Review the [supported-state matrix](docs/SUPPORTED-STATES.md) before using it on important work. Keep another copy: a verified same-disk checkpoint is not independent backup.
+**Experimental 0.1.0.** Local verification has been performed on macOS. Linux checks are configured in GitHub Actions; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
+
+The recovery workflow runs locally, without an AI provider, cloud account, or background service. A verified same-device checkpoint is not an independent backup.
 
 ## What Timber does
 
@@ -26,24 +28,33 @@ Timber has no move, delete, prune, or apply-to-source command. A clean preview e
 Prerequisites: macOS or Linux, Rust 1.85 or newer, and Git with `merge-tree --write-tree` support (Git 2.38 or newer).
 
 ```sh
+git clone https://github.com/MendozaLab/Timber.git
+cd Timber
 cargo install --path . --locked
+timber --version
 ```
 
-The package is named `timber-worktrees`; its installed command is `timber`. Registry publication is separate from the source repository. Until a package release is published, install from source.
+The Cargo package is `timber-worktrees`; the executable is `timber`. This guide uses installation from source.
 
-## A first review
+## Start with read-only inspection
 
-Choose a store outside your repositories, preferably on a different physical device if you need independent backup. For this example, `./timber-store` is a sibling of the example repositories, not a child of one.
+Replace the example paths with your own. These commands inspect existing work without creating a checkpoint or modifying the sources.
 
 ```sh
-# List registrations; deeply inspect the target and compare the selected saved folder.
-timber --store ./timber-store inspect --repo ./project \
-  --folder ./saved-agent-work --compare-folders
+timber inspect --repo /path/to/project
 
+timber inspect --repo /path/to/project \
+  --folder /path/to/saved-work --compare-folders
+```
+
+## Preserve, verify, and preview
+
+In this example, `project/` and `agent-navigation/` are related worktrees. Run from their parent directory. Choose a store outside every source repository, preferably on another physical device if you need independent backup. The preview destination must also be outside every source.
+
+```sh
 # Preserve the target and each useful source. Copy the printed checkpoint IDs.
 timber --store ./timber-store checkpoint ./project
 timber --store ./timber-store checkpoint ./agent-navigation
-timber --store ./timber-store import ./saved-agent-work
 
 # Verify each checkpoint before using it.
 timber --store ./timber-store verify TARGET_ID
@@ -60,7 +71,7 @@ timber --store ./timber-store preview plan.json --to ./review-preview
 timber --store ./timber-store assess plan.json
 ```
 
-`TARGET_ID` and `SOURCE_ID` are placeholders for real checkpoint IDs printed by your run. The [user guide](docs/USER-GUIDE.md) explains layer selection, extra files, folder mappings, and structured reports.
+`TARGET_ID` and `SOURCE_ID` are placeholders for real checkpoint IDs printed by your run. A plan selects one layer per source: committed, staged, or working. Untracked and ignored additions require explicit selection for integration. The [user guide](docs/USER-GUIDE.md) explains these selections, recovery-folder mappings, and structured reports.
 
 ## Review visually
 
@@ -97,19 +108,25 @@ Inspection distinguishes same-path matches, competing versions, additions at pro
 
 For folders whose tracked work is held in another repository, explicit `import --map ... --dependency-repo ...` can preserve pinned commit or stash dependencies. `restore-git` reconstructs a captured group independently; inspection alone is not that recovery proof. See the [user guide](docs/USER-GUIDE.md).
 
-## Development
+## Verification and performance
+
+The current source passed **80 automated tests** locally on macOS with Rust 1.98.1 and Rust 1.85.1, along with formatting and strict Clippy checks. The tests use disposable synthetic repositories and require no private project data or provider account. A configured GitHub Actions matrix is separate from a passing hosted run.
+
+The [reproducible demonstration](docs/DEMO.md) covers successful and refused operations, recovery without original repositories, source drift, and corruption detection. Its recorded sample remains bound to the revision and executable identified there.
+
+See the [matched performance study](docs/PERFORMANCE.md) for the original-versus-batched comparison. Timings are scoped to its synthetic fixture, build profile, and local conditions; they are not developer-productivity or large-repository guarantees.
+
+## Development and contributions
 
 ```sh
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-The automated checks use disposable synthetic repositories. They must not depend on private source repositories, cloud services, or an AI provider.
+Bug reports and focused contributions are welcome. Use invented data for reproductions and retain expected refusals as well as successful cases. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sharing reports or changes.
 
-Read the [architecture](docs/ARCHITECTURE.md), [failure handling](docs/SAFETY.md), [supported-state matrix](docs/SUPPORTED-STATES.md), and [recorded demonstration](docs/DEMO.md) for the design and the evidence actually obtained.
-
-See the [matched inspection timing](docs/PERFORMANCE.md) for the original-versus-batched comparison, its exact executable identities, and its limits.
+Further documentation: [user guide](docs/USER-GUIDE.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
 
 ## License
 
