@@ -25,6 +25,8 @@ cargo test --locked
 
 For performance changes, compare the same frozen input and build profile. Preserve individual results, verify matching findings and unchanged sources, and state what is outside the measurement. The [inspection benchmark](docs/PERFORMANCE.md) describes the existing method.
 
+Pin third-party GitHub Actions to full commit IDs, with a comment identifying the reviewed version. The repository's Actions policy rejects moving tags and branch references before checks can run.
+
 Before opening a pull request:
 
 - Describe the behavior change and the problem it solves.
