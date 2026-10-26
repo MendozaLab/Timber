@@ -208,6 +208,9 @@ impl Store {
                 self.get(&entry.blob)?;
             }
         }
+        for dependency in &manifest.captured_dependencies {
+            self.get(&dependency.bundle)?;
+        }
         self.write_immutable(
             "checkpoints",
             &format!("{}.json", manifest.id),
@@ -319,6 +322,50 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
             "import mapping is only valid for folders"
         );
     }
+    let mut dependency_groups = std::collections::BTreeSet::new();
+    for captured in &manifest.captured_dependencies {
+        ensure!(
+            manifest.source_kind == "folder",
+            "captured external dependencies belong to folder imports"
+        );
+        crate::dependencies::validate_declaration(&captured.dependency)?;
+        ensure!(
+            dependency_groups.insert(&captured.dependency.group),
+            "duplicate captured dependency group"
+        );
+        ensure!(
+            valid_digest(&captured.bundle),
+            "invalid captured dependency bundle digest"
+        );
+        ensure!(
+            !captured.protected_roots.is_empty(),
+            "captured dependency lacks protected source roots"
+        );
+        for root in &captured.protected_roots {
+            let root = Path::new(root);
+            ensure!(
+                root.is_absolute()
+                    && root.components().all(|part| !matches!(
+                        part,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )),
+                "captured dependency protected root must be absolute and normalized"
+            );
+        }
+        let declaration = manifest
+            .import_map
+            .as_ref()
+            .and_then(|map| {
+                map.git_dependencies
+                    .iter()
+                    .find(|d| d.group == captured.dependency.group)
+            })
+            .context("captured dependency has no matching declaration")?;
+        ensure!(
+            declaration == &captured.dependency,
+            "captured dependency differs from import declaration"
+        );
+    }
     Ok(())
 }
 
@@ -344,12 +391,13 @@ pub fn validate_import_map(map: &crate::model::ImportMap) -> Result<()> {
             ensure!(valid_digest(base), "invalid base digest");
         }
     }
+    let mut dependency_groups = std::collections::BTreeSet::new();
     for dependency in &map.git_dependencies {
+        crate::dependencies::validate_declaration(dependency)?;
         ensure!(
-            valid_oid(&dependency.oid),
-            "invalid declared Git dependency"
+            dependency_groups.insert(&dependency.group),
+            "duplicate dependency group"
         );
-        ensure!(!dependency.group.is_empty(), "empty dependency group");
     }
     Ok(())
 }

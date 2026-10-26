@@ -84,3 +84,44 @@ fn inspection_exposes_counts_and_blockers_before_raw_evidence() {
     assert!(html.contains("Preserved folders to review"));
     assert!(html.find("agent-a").unwrap() < html.find("Complete recorded evidence").unwrap());
 }
+
+#[test]
+fn inspection_summary_exposes_scope_payload_and_dependency_status_without_raw_expansion() {
+    let value = json!({"status":"partial","elapsed_seconds":0.75,"registration_stable":true,"scope":{"mode":"selected_worktrees","registered_worktrees":4,"deep_scanned_worktrees":1,"listed_only_worktrees":2,"missing_registrations":1,"metadata_prune_candidates":1,"failed_or_partial_scans":1},"folders":[{"path":"saved-fixture","kind":"preservation_folder_with_receipt","inspection_status":"partial","comparison_requested":true,"summary":{"payload_files":6,"same_path_identical":2,"same_path_different":1,"absent_at_proposed_path":3,"saved_git_versions":2},"git_dependencies":[{"group":"saved-a","status":"matched","object_available":true},{"group":"saved-b","status":"hash_mismatch","object_available":true},{"group":"saved-c","status":"missing","object_available":false}]}],"consolidation_summary":{"payload":{"payload_files":6,"same_path_identical":2,"same_path_different":1,"absent_at_proposed_path":3},"tracked_git_versions":2,"tracked_git_comparisons":{"same_path_different":2},"unique_proposed_target_paths":5,"exact_duplicate_saved_group_count":1,"duplicate_extra_copies":1}});
+    let html = report::render(&value);
+    let before = html.split("Complete recorded evidence").next().unwrap();
+    for text in [
+        "Inspection scope and timing",
+        "Worktrees inspected deeply",
+        "Other worktrees listed only",
+        "Elapsed seconds",
+        "Consolidation candidates across saved folders",
+        "Same path, bytes and executable state",
+        "Competing current versions",
+        "Absent at proposed target path",
+        "Saved-content fingerprint mismatches",
+        "Unresolved dependencies",
+        "saved-b",
+        "Hash mismatch",
+        "not an approved deletion list",
+    ] {
+        assert!(before.contains(text), "missing {text}");
+    }
+    assert!(html.contains("class=\"status warn\""));
+    let terminal = report::terminal(&value);
+    assert!(terminal.contains("1 deeply inspected; 2 listed only; 1 missing"));
+    assert!(
+        terminal.contains("Matching copies: 2; competing versions: 1; absent at proposed path: 3")
+    );
+    assert!(terminal.contains("3 declared; 2 available; 1 content mismatches; 2 unresolved"));
+}
+
+#[test]
+fn metadata_only_folder_report_does_not_present_zero_matches_as_a_completed_comparison() {
+    let html = report::render(
+        &json!({"folders":[{"path":"saved-fixture","summary":{"payload_files":5},"comparison_requested":false,"git_dependencies":[]}]}),
+    );
+    let before = html.split("Complete recorded evidence").next().unwrap();
+    assert!(before.contains("Payload content comparison was not requested"));
+    assert!(!before.contains("Same path, bytes and executable state"));
+}

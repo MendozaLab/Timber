@@ -11,6 +11,8 @@ Timber is for the moment when several worktrees contain useful changes and you c
 ## What Timber does
 
 - Inventories registered worktrees and explicitly supplied preservation folders.
+- Deeply inspects the requested worktree by default; add `--all-worktrees` or select additional worktrees explicitly.
+- Compares saved folder payloads and declared Git-backed versions against a chosen target when requested.
 - Preserves staged contents separately from working files, including selected ignored assets.
 - Restores checkpoints in isolation and compares the reconstructed state.
 - Compares frozen sources with a chosen target, using exact ancestry and content evidence.
@@ -34,9 +36,9 @@ The package is named `timber-worktrees`; its installed command is `timber`. Regi
 Choose a store outside your repositories, preferably on a different physical device if you need independent backup. For this example, `./timber-store` is a sibling of the example repositories, not a child of one.
 
 ```sh
-# Inspect registered worktrees and an old folder of saved files.
+# List registrations; deeply inspect the target and compare the selected saved folder.
 timber --store ./timber-store inspect --repo ./project \
-  --folder ./saved-agent-work
+  --folder ./saved-agent-work --compare-folders
 
 # Preserve the target and each useful source. Copy the printed checkpoint IDs.
 timber --store ./timber-store checkpoint ./project
@@ -90,6 +92,10 @@ Recovery, consolidation, and acceptance are distinct:
 | Human review and project tests | A separate decision about usefulness and application behavior. |
 
 An old folder can be captured and restored successfully while its former worktree history remains unknown. Similar filenames or similar patches never establish that work is redundant.
+
+Inspection distinguishes same-path matches, competing versions, additions at proposed paths, and unresolved Git dependencies. Exact duplicate groups can overlap with copies matching the target; their counts must not be added as independent cleanup opportunities. Missing registrations are metadata-review candidates, not permission to delete branches or saved work.
+
+For folders whose tracked work is held in another repository, explicit `import --map ... --dependency-repo ...` can preserve pinned commit or stash dependencies. `restore-git` reconstructs a captured group independently; inspection alone is not that recovery proof. See the [user guide](docs/USER-GUIDE.md).
 
 ## Development
 

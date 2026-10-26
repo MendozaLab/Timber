@@ -51,12 +51,34 @@ pub struct ImportFile {
     #[serde(default)]
     pub base_sha256: Option<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitDependency {
     pub group: String,
     pub oid: String,
     #[serde(default)]
     pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracked_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub expected_files: BTreeMap<String, ExpectedFile>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExpectedFile {
+    pub sha256: String,
+    pub bytes: u64,
+    pub mode: u32,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapturedDependency {
+    pub dependency: GitDependency,
+    pub bundle: String,
+    pub protected_roots: Vec<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportMap {
@@ -80,6 +102,8 @@ pub struct Manifest {
     pub excluded: Vec<Exclusion>,
     pub capture: CaptureConditions,
     pub import_map: Option<ImportMap>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captured_dependencies: Vec<CapturedDependency>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]

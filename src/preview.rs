@@ -470,6 +470,11 @@ pub fn build(store: &Store, plan: &Plan, to: &Path) -> Result<PreviewResult> {
                 fsx::ensure_outside(to, Path::new(root))?;
             }
         }
+        for captured in &manifest.captured_dependencies {
+            for root in &captured.protected_roots {
+                fsx::ensure_outside(to, Path::new(root))?;
+            }
+        }
         let receipt = restore::verify(store, &manifest.id)?;
         ensure!(
             receipt.verified,
@@ -498,6 +503,9 @@ pub fn build(store: &Store, plan: &Plan, to: &Path) -> Result<PreviewResult> {
             if let Some(state) = &manifest.git {
                 roots.extend(state.protected_roots.clone());
             }
+            for captured in &manifest.captured_dependencies {
+                roots.extend(captured.protected_roots.clone());
+            }
             roots
         })
         .collect();
@@ -508,7 +516,7 @@ pub fn build(store: &Store, plan: &Plan, to: &Path) -> Result<PreviewResult> {
         let candidate = if manifest.git.is_some() {
             selected_commit(store, to, manifest, selection)?
         } else {
-            result.notes.push(format!("Folder checkpoint {} contributes only explicitly selected present files. Historical completeness is unknown; declared external Git dependencies are not reconstructed.", manifest.id));
+            result.notes.push(format!("Folder checkpoint {} contributes only explicitly selected present files. Historical completeness is unknown; {} separately captured Git dependencies are not integrated by this folder contribution. Restore and checkpoint them separately to select their changes.",manifest.id,manifest.captured_dependencies.len()));
             let mut files = tree_files(to, &current)?;
             let mut conflicts = Vec::new();
             for (entry, target_path, base) in folder_files(manifest, selection)? {

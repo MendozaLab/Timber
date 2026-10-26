@@ -6,7 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -246,14 +246,25 @@ pub fn checkpoint(
     let head = git::text(&source, &["rev-parse", "--verify", "HEAD"])?;
     let branch = git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok();
     let index_before = read_index(&source)?;
+    let object_ids = index_before
+        .iter()
+        .map(|(_, _, oid)| oid.clone())
+        .collect::<Vec<_>>();
+    let mut staged_objects = BTreeMap::new();
+    git::for_each_blob(&source, &object_ids, |oid, bytes| {
+        staged_objects.insert(oid.to_owned(), store.put(&bytes)?);
+        Ok(())
+    })?;
     let mut index = Vec::new();
     for (path, mode, oid) in &index_before {
-        let bytes = git::run(&source, &["cat-file", "blob", oid])?;
         index.push(IndexEntry {
             path: path.clone(),
             mode: mode.clone(),
             oid: oid.clone(),
-            blob: store.put(&bytes)?,
+            blob: staged_objects
+                .get(oid)
+                .context("staged Git blob was not captured")?
+                .clone(),
         });
     }
     persist_entries(store, &source, &entries)?;
@@ -329,6 +340,7 @@ pub fn checkpoint(
             writer_exclusion_enforced: false,
         },
         import_map: None,
+        captured_dependencies: Vec::new(),
     };
     manifest.id = manifest_id(&manifest)?;
     finish(store, &marker, &manifest)?;
@@ -341,6 +353,16 @@ pub fn import_folder(
     map: Option<ImportMap>,
     writers_paused: bool,
 ) -> Result<Manifest> {
+    import_folder_with_dependencies(store, path, map, writers_paused, None)
+}
+
+pub fn import_folder_with_dependencies(
+    store: &Store,
+    path: &Path,
+    map: Option<ImportMap>,
+    writers_paused: bool,
+    dependency_repo: Option<&Path>,
+) -> Result<Manifest> {
     let source = path.canonicalize()?;
     fsx::ensure_outside(&store.root, &source)?;
     ensure!(
@@ -350,7 +372,25 @@ pub fn import_folder(
     if let Some(map) = &map {
         validate_import_map(map)?;
     }
+    // Preflight every dependency source before writing even an incomplete marker.
+    if let Some(repo) = dependency_repo {
+        for root in git::protected_roots(repo)? {
+            fsx::ensure_outside(&store.root, &root)?;
+        }
+    }
     let marker = started(store, &source, "folder_import")?;
+    let captured_dependencies = if let Some(repo) = dependency_repo {
+        let map = map
+            .as_ref()
+            .context("dependency capture requires an explicit import map")?;
+        ensure!(
+            !map.git_dependencies.is_empty(),
+            "import map has no Git dependencies to capture"
+        );
+        crate::dependencies::capture(store, repo, &map.git_dependencies)?
+    } else {
+        Vec::new()
+    };
     let entries = fsx::inventory(&source)?;
     if let Some(map) = &map {
         for file in &map.files {
@@ -383,6 +423,7 @@ pub fn import_folder(
             writer_exclusion_enforced: false,
         },
         import_map: map,
+        captured_dependencies,
     };
     manifest.id = manifest_id(&manifest)?;
     finish(store, &marker, &manifest)?;

@@ -125,7 +125,14 @@ pub fn create(store: &Store, target: Selection, sources: Vec<Selection>) -> Resu
                     }
                 }
                 for dependency in &map.git_dependencies {
-                    row.notes.push(format!("Declared Git dependency {} for group {:?} has not been reconstructed or verified by a folder import.", dependency.oid, dependency.group));
+                    let captured = manifest.captured_dependencies.iter().any(|c| {
+                        c.dependency.group == dependency.group && c.dependency.oid == dependency.oid
+                    });
+                    row.notes.push(if captured {
+                        format!("Git dependency {} for group {:?} is preserved and recovery-verified separately; restore-git then checkpoint it to select those changes for a preview.",dependency.oid,dependency.group)
+                    }else{
+                        format!("Declared Git dependency {} for group {:?} has not been captured or independently reconstructed.",dependency.oid,dependency.group)
+                    });
                 }
             }
         }
@@ -333,11 +340,14 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
         if !alternates(&manifest).is_empty() {
             blockers.push("staged_and_working_alternates_require_review".into());
         }
-        if manifest
-            .import_map
-            .as_ref()
-            .is_some_and(|m| !m.git_dependencies.is_empty())
-        {
+        if manifest.import_map.as_ref().is_some_and(|m| {
+            m.git_dependencies.iter().any(|d| {
+                !manifest
+                    .captured_dependencies
+                    .iter()
+                    .any(|c| c.dependency.group == d.group && c.dependency.oid == d.oid)
+            })
+        }) {
             blockers.push("declared_git_dependencies_not_reconstructed".into());
         }
         blockers.push("human_review_required_before_cleanup".into());

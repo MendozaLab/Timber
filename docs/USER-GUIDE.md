@@ -16,7 +16,23 @@ Restoration and preview destinations must be new directories. Timber refuses exi
 timber inspect --repo ./project --folder ./saved-work --folder ./old-agent-copy
 ```
 
-Inspection checks the selected repository and its registered worktrees. It does not crawl your entire computer. Supply preservation folders explicitly.
+Inspection lists registrations for the selected repository, but deeply checks only the requested worktree by default. Other existing worktrees are marked `not_scanned`. This focused default replaces the original automatic scan of every worktree. It does not crawl your entire computer. Supply preservation folders explicitly.
+
+```sh
+# Add one registered source to the deep scan.
+timber inspect --repo ./project --worktree ./agent-navigation
+
+# Explicitly inspect every registered worktree.
+timber inspect --repo ./project --all-worktrees
+
+# Compare supplied saved folders with the current target, including receipt-declared Git versions.
+timber --json inspect --repo ./project --folder ./saved-work \
+  --compare-folders --out inspection.json
+```
+
+Progress goes to standard error; structured output stays on standard output. Scope, elapsed time, partial results and skipped worktrees are recorded. Indexed Git content is read through a streaming batch instead of launching a Git process for each tracked file. Ignored files remain metadata-only; `--compare-folders` explicitly enables reads of supplied recovery-folder payloads and their proposed current target paths.
+
+Same-path comparisons require equal content hashes, byte lengths, file types and executable flags. Different versions need review. Absent means absent at the proposed target path, not absent everywhere. Saved-copy duplicate groups require the same proposed target and exact fingerprints. They can overlap the target-match count, so do not add them as independent cleanup candidates.
 
 Keep these classes separate:
 
@@ -41,7 +57,17 @@ Pause your writers when possible. `--writers-paused` records your declaration; i
 timber import ./saved-work --map ./folder-map.json
 ```
 
-A folder import captures the supported files present now. It does not synthesize the former repository's commit, index, or complete history. See [the mapping example](../examples/import-map.json) for a public schema that declares source groups, selected destination paths, and Git dependencies. Dependencies remain declarations to assess; a receipt's success flag does not establish recovery.
+A folder import captures the supported files present now. It does not synthesize the former repository's commit, index, or complete history. See [the mapping example](../examples/import-map.json) for a public schema that declares source groups, selected destination paths, and Git dependencies. Without an explicit dependency repository, dependencies remain unresolved declarations; a receipt's success flag does not establish recovery.
+
+Inspection understands the canonical `import-map.json` and supported file-manifest or grouped receipt structures. It validates relative mappings and never follows absolute producer source/output paths. Supported receipts can produce a `derived_import_map` in the private inspection result. Review that map, then save it outside the originals before an import.
+
+```sh
+# Preserve declared Git dependencies from an explicitly selected repository.
+timber import ./saved-work --map ./folder-map.json \
+  --dependency-repo ./project
+```
+
+Dependency declarations pin a commit identity and may additionally pin its reference, source head, tracked paths and expected file fingerprints. A moved reference, missing object, unsupported topology or mismatched expected content blocks dependency capture. The source repository is read without changing its references, index or files. Captured dependencies have their own portable object closure, so recovery does not borrow objects from the original repository.
 
 ## 3. Verify and restore
 
@@ -50,11 +76,16 @@ timber checkpoints list
 timber checkpoints show CHECKPOINT_ID
 timber verify CHECKPOINT_ID
 timber restore CHECKPOINT_ID --to ./restored-copy
+
+# Reconstruct a captured saved Git group separately from the loose folder files.
+timber restore-git CHECKPOINT_ID --group saved-agent --to ./restored-git-copy
 ```
 
 Verification reconstructs into an isolated temporary destination and compares it. Restore reconstructs into a new destination you choose. Neither operation executes hooks, filters, builds, dependency installation, or project code.
 
 A successful result covers the supported state in that checkpoint. Excluded files, historical completeness, independent backup, and application correctness stay separate.
+
+`restore-git` requires the group to have been captured through `--dependency-repo`. Supported stash dependencies reconstruct their base, staged and working layers; a supported untracked parent is restored separately into that working copy. Ordinary pinned commits restore their recorded tree. Folder files and Git-backed state are separate recovery components, and neither proves that every file from a former checkout has been recovered.
 
 ## 4. Choose a target and sources
 

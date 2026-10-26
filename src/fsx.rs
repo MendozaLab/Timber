@@ -178,6 +178,76 @@ pub fn read_entry(root: &Path, entry: &Entry) -> Result<Vec<u8>> {
 pub fn inventory(root: &Path) -> Result<Vec<Entry>> {
     inventory_filtered(root, |_| true)
 }
+
+/// Hash supported leaf contents without buffering entire media files in memory.
+pub fn fingerprint(root: &Path, entry: &Entry) -> Result<(String, u64)> {
+    validate_relative(&entry.path)?;
+    if entry.kind != EntryKind::File {
+        let bytes = read_entry(root, entry)?;
+        return Ok((digest(&bytes), bytes.len() as u64));
+    }
+    let path = root.join(&entry.path);
+    let before = fs::symlink_metadata(&path)?;
+    ensure!(
+        before.is_file() && !is_placeholder(&before),
+        "unsupported or cloud-placeholder source"
+    );
+    let (parent, name) = parent_fd(root, &entry.path)?;
+    // SAFETY: live confined directory and NUL-terminated component; no symlinks followed.
+    let raw = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if raw < 0 {
+        return Err(std::io::Error::last_os_error()).context("open source for fingerprint");
+    }
+    // SAFETY: openat returned a uniquely owned descriptor.
+    let mut file = unsafe { File::from_raw_fd(raw) };
+    let opened = file.metadata()?;
+    ensure!(
+        opened.is_file()
+            && opened.ino() == before.ino()
+            && opened.dev() == before.dev()
+            && !is_placeholder(&opened),
+        "source changed while opening fingerprint"
+    );
+    let mut hash = Sha256::new();
+    let mut count = 0u64;
+    let mut buffer = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+        count += n as u64;
+    }
+    let after = file.metadata()?;
+    let current = fs::symlink_metadata(&path)?;
+    ensure!(
+        opened.len() == after.len()
+            && opened.mtime() == after.mtime()
+            && opened.mtime_nsec() == after.mtime_nsec()
+            && opened.ctime() == after.ctime()
+            && opened.ctime_nsec() == after.ctime_nsec()
+            && opened.mode() == after.mode()
+            && current.ino() == opened.ino()
+            && current.dev() == opened.dev()
+            && count == opened.len(),
+        "source changed during fingerprint"
+    );
+    let digest = hex::encode(hash.finalize());
+    if !entry.sha256.is_empty() {
+        ensure!(
+            entry.sha256 == digest && entry.size == count,
+            "source fingerprint mismatch"
+        );
+    }
+    Ok((digest, count))
+}
 pub fn inventory_filtered(root: &Path, include: impl Fn(&str) -> bool) -> Result<Vec<Entry>> {
     let meta = fs::symlink_metadata(root)?;
     ensure!(

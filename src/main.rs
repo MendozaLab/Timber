@@ -42,6 +42,15 @@ enum Commands {
         repo: PathBuf,
         #[arg(long)]
         folder: Vec<PathBuf>,
+        /// Inspect all registered worktrees deeply; default inspects the selected repository only.
+        #[arg(long)]
+        all_worktrees: bool,
+        /// Additional registered worktrees to inspect deeply.
+        #[arg(long)]
+        worktree: Vec<PathBuf>,
+        /// Compare saved payload bytes and Git-backed tracked versions against the selected target.
+        #[arg(long)]
+        compare_folders: bool,
     },
     /// Capture supported Git and filesystem state. Does not stage or commit the source.
     Checkpoint {
@@ -58,6 +67,9 @@ enum Commands {
         map: Option<PathBuf>,
         #[arg(long)]
         writers_paused: bool,
+        /// Explicit existing repository from which to preserve declared Git dependencies.
+        #[arg(long, requires = "map")]
+        dependency_repo: Option<PathBuf>,
     },
     Checkpoints {
         #[command(subcommand)]
@@ -67,6 +79,14 @@ enum Commands {
     Verify { id: String },
     Restore {
         id: String,
+        #[arg(long)]
+        to: PathBuf,
+    },
+    /// Reconstruct one captured Git dependency in a fresh independent repository.
+    RestoreGit {
+        id: String,
+        #[arg(long)]
+        group: String,
         #[arg(long)]
         to: PathBuf,
     },
@@ -166,6 +186,9 @@ fn manifest_roots(manifest: &timber_worktrees::model::Manifest) -> Vec<PathBuf> 
     if let Some(state) = &manifest.git {
         roots.extend(state.protected_roots.iter().map(PathBuf::from));
     }
+    for captured in &manifest.captured_dependencies {
+        roots.extend(captured.protected_roots.iter().map(PathBuf::from));
+    }
     roots
 }
 fn protect_output(output: Option<&Path>, roots: &[PathBuf]) -> Result<()> {
@@ -181,8 +204,22 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
     let store_path = cli.store.clone().map(Ok).unwrap_or_else(default_store)?;
     let mut code = 0;
     let (command, result) = match &cli.command {
-        Commands::Inspect { repo, folder } => {
-            let result = inspect::inspect(repo, folder)?;
+        Commands::Inspect {
+            repo,
+            folder,
+            all_worktrees,
+            worktree,
+            compare_folders,
+        } => {
+            let options = inspect::InspectOptions {
+                all_worktrees: *all_worktrees,
+                worktrees: worktree.clone(),
+                compare_folders: *compare_folders,
+            };
+            let result = inspect::inspect_with_options(repo, folder, &options)?;
+            if result["status"] == "partial" {
+                code = 1;
+            }
             let mut roots = vec![repo.clone()];
             roots.extend(folder.clone());
             if let Some(trees) = result["worktrees"].as_array() {
@@ -215,12 +252,24 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             folder,
             map,
             writers_paused,
+            dependency_repo,
         } => {
             fsx::ensure_outside(&store_path, folder)?;
             protect_output(cli.out.as_deref(), std::slice::from_ref(folder))?;
+            if let Some(repo) = dependency_repo {
+                let roots = timber_worktrees::git::protected_roots(repo)?;
+                protect_output(Some(&store_path), &roots)?;
+                protect_output(cli.out.as_deref(), &roots)?;
+            }
             let map: Option<ImportMap> = map.as_deref().map(read_json).transpose()?;
             let store = Store::open(&store_path)?;
-            let manifest = capture::import_folder(&store, folder, map, *writers_paused)?;
+            let manifest = capture::import_folder_with_dependencies(
+                &store,
+                folder,
+                map,
+                *writers_paused,
+                dependency_repo.as_deref(),
+            )?;
             let verification = restore::verify(&store, &manifest.id)?;
             (
                 "import",
@@ -257,6 +306,17 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             let m = store.load(id)?;
             protect_output(cli.out.as_deref(), &manifest_roots(&m))?;
             ("restore", value(restore::restore(&store, id, to)?)?)
+        }
+        Commands::RestoreGit { id, group, to } => {
+            let store = Store::existing(&store_path)?;
+            let manifest = store.load(id)?;
+            let roots = manifest_roots(&manifest);
+            protect_output(Some(to), &roots)?;
+            protect_output(cli.out.as_deref(), &roots)?;
+            (
+                "restore_git",
+                value(restore::restore_dependency(&store, id, group, to)?)?,
+            )
         }
         Commands::Plan {
             target,
@@ -412,7 +472,7 @@ fn main() {
         Err(error) => {
             let code = if matches!(
                 cli.command,
-                Commands::Verify { .. } | Commands::Restore { .. }
+                Commands::Verify { .. } | Commands::Restore { .. } | Commands::RestoreGit { .. }
             ) {
                 4
             } else {

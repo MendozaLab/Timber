@@ -80,7 +80,7 @@ pub fn render(value: &Value) -> String {
          main{max-width:1080px;margin:auto;padding:40px 24px 64px}header{border-bottom:2px solid var(--accent);padding-bottom:24px;margin-bottom:28px}\
          .brand{font-size:15px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}h1{font-size:clamp(28px,5vw,42px);line-height:1.18;margin:10px 0 16px}\
          h2{font-size:23px;line-height:1.3;margin:0 0 12px}h3{font-size:17px;margin:18px 0 8px}p{max-width:76ch}\
-         .status{display:inline-block;background:#e6efe4;border:1px solid #b6cdb4;border-radius:6px;padding:7px 12px;font-weight:650}\
+         .status{display:inline-block;background:#e6efe4;border:1px solid #b6cdb4;border-radius:6px;padding:7px 12px;font-weight:650}.status.warn{background:#fff1d6;border-color:#cba362;color:#67420a}\
          .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}.panel,details{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:22px;margin-bottom:20px;min-width:0}\
          .quiet{color:var(--muted)}ul{padding-left:22px}li{margin:8px 0;overflow-wrap:anywhere}code,pre{font:13px/1.55 ui-monospace,monospace;overflow-wrap:anywhere}\
          pre{white-space:pre-wrap;background:var(--paper);padding:14px;border-radius:5px}dl{display:grid;grid-template-columns:minmax(100px,1fr) minmax(140px,3fr);gap:9px 16px;margin:0}\
@@ -91,7 +91,18 @@ pub fn render(value: &Value) -> String {
          </style></head><body><main><header><div class=\"brand\">Timber!</div>\
          <h1>Untangle dirty worktrees.<br>Keep the useful work.</h1>",
     );
-    let _ = write!(html, "<p class=\"status\">{}</p>", escape(&status(value)));
+    let result_status = status(value);
+    let warning = matches!(
+        body.get("status").and_then(Value::as_str),
+        Some("partial" | "conflicted" | "blocked" | "failed" | "incomplete")
+    ) || body.get("verified") == Some(&Value::Bool(false))
+        || value.get("error").is_some();
+    let _ = write!(
+        html,
+        "<p class=\"status{}\">{}</p>",
+        if warning { " warn" } else { "" },
+        escape(&result_status)
+    );
     if let Some(command) = value.get("command").and_then(Value::as_str) {
         let _ = write!(
             html,
@@ -100,6 +111,8 @@ pub fn render(value: &Value) -> String {
         );
     }
     html.push_str("<p>This is a local review of recorded evidence. A clean merge shows that selected changes combine mechanically; application behavior needs separate testing.</p></header>");
+    render_inspection_scope(body, &mut html);
+    render_consolidation_summary(body, &mut html);
     render_inventory(body, &mut html);
     render_comparisons(body, &mut html);
     html.push_str("<section class=\"panel\"><h2>What needs review?</h2>");
@@ -141,6 +154,193 @@ fn is_empty(value: &Value) -> bool {
     }
 }
 
+fn render_inspection_scope(body: &Value, html: &mut String) {
+    let Some(scope) = body.get("scope") else {
+        return;
+    };
+    html.push_str("<section class=\"panel\"><h2>Inspection scope and timing</h2><dl>");
+    for (key, label) in [
+        ("mode", "Selected scope"),
+        ("registered_worktrees", "Registered worktrees listed"),
+        ("deep_scanned_worktrees", "Worktrees inspected deeply"),
+        ("listed_only_worktrees", "Other worktrees listed only"),
+        ("missing_registrations", "Missing worktree locations"),
+        (
+            "metadata_prune_candidates",
+            "Registration-metadata review candidates",
+        ),
+        ("failed_or_partial_scans", "Failed or partial scans"),
+    ] {
+        if let Some(value) = scope.get(key) {
+            let _ = write!(html, "<dt>{label}</dt><dd>{}</dd>", escape(&scalar(value)));
+        }
+    }
+    if let Some(seconds) = body.get("elapsed_seconds") {
+        let _ = write!(
+            html,
+            "<dt>Elapsed seconds</dt><dd>{}</dd>",
+            escape(&scalar(seconds))
+        );
+    }
+    if let Some(stable) = body.get("registration_stable") {
+        let _ = write!(
+            html,
+            "<dt>Registrations unchanged during scan</dt><dd>{}</dd>",
+            escape(&scalar(stable))
+        );
+    }
+    html.push_str("</dl><p class=\"quiet\">Listed-only worktrees have not had their files inspected. Registration metadata candidates do not establish that branch history or saved work can be discarded.</p></section>");
+}
+
+fn dependency_counts(item: &Value) -> (usize, usize, usize, usize) {
+    let Some(dependencies) = item.get("git_dependencies").and_then(Value::as_array) else {
+        return (0, 0, 0, 0);
+    };
+    let available = dependencies
+        .iter()
+        .filter(|d| d["object_available"] == true)
+        .count();
+    let hashes = dependencies
+        .iter()
+        .filter(|d| d["status"] == "hash_mismatch")
+        .count();
+    let unresolved = dependencies
+        .iter()
+        .filter(|d| {
+            !matches!(
+                d["status"].as_str(),
+                Some("matched" | "available_content_checked" | "available_unverified_content")
+            )
+        })
+        .count();
+    (dependencies.len(), available, hashes, unresolved)
+}
+
+fn render_consolidation_summary(body: &Value, html: &mut String) {
+    let Some(summary) = body.get("consolidation_summary") else {
+        return;
+    };
+    if summary.get("folders_analyzed") == Some(&Value::from(0)) {
+        return;
+    }
+    if summary.get("content_comparisons_requested") == Some(&Value::Bool(false)) {
+        html.push_str("<section class=\"panel\"><h2>Saved-folder comparison not requested</h2><p>Use <code>--compare-folders</code> to assess exact matches and consolidation candidates in explicitly supplied recovery folders.</p></section>");
+        return;
+    }
+    html.push_str(
+        "<section class=\"panel\"><h2>Consolidation candidates across saved folders</h2><dl>",
+    );
+    for (key, label) in [
+        ("payload_files", "Saved payload copies"),
+        ("same_path_identical", "Copies matching the current target"),
+        ("same_path_different", "Competing current versions"),
+        (
+            "absent_at_proposed_path",
+            "Addition candidates at proposed paths",
+        ),
+    ] {
+        let value = summary["payload"][key].as_u64().unwrap_or(0);
+        let _ = write!(html, "<dt>{label}</dt><dd>{value}</dd>");
+    }
+    for (key, label) in [
+        (
+            "tracked_git_versions",
+            "Git-backed saved versions inspected",
+        ),
+        (
+            "unique_proposed_target_paths",
+            "Distinct proposed target paths",
+        ),
+        (
+            "exact_duplicate_saved_group_count",
+            "Exact saved-copy duplicate groups",
+        ),
+        ("duplicate_extra_copies", "Extra copies within those groups"),
+    ] {
+        if let Some(value) = summary.get(key) {
+            let _ = write!(html, "<dt>{label}</dt><dd>{}</dd>", escape(&scalar(value)));
+        }
+    }
+    html.push_str("</dl><p>These categories overlap: a saved duplicate can also match the current target. They are review candidates, not an approved deletion list.</p>");
+    if let Some(values) = summary
+        .get("tracked_git_comparisons")
+        .filter(|v| !is_empty(v))
+    {
+        html.push_str("<h3>Saved Git version comparison</h3>");
+        render_value(values, html, 0);
+    }
+    html.push_str("</section>");
+}
+
+fn render_folder_summary(item: &Value, html: &mut String) {
+    let Some(summary) = item.get("summary") else {
+        return;
+    };
+    html.push_str("<h3>Saved-file comparison</h3><dl>");
+    if let Some(count) = summary.get("payload_files") {
+        let _ = write!(
+            html,
+            "<dt>Saved payload files</dt><dd>{}</dd>",
+            escape(&scalar(count))
+        );
+    }
+    if item.get("comparison_requested") == Some(&Value::Bool(true)) {
+        for (key, label) in [
+            (
+                "same_path_identical",
+                "Same path, bytes and executable state",
+            ),
+            ("same_path_different", "Competing current versions"),
+            ("absent_at_proposed_path", "Absent at proposed target path"),
+            ("receipt_hash_mismatch", "Receipt fingerprint mismatches"),
+            ("saved_file_missing", "Missing saved files"),
+            ("unmapped", "Unmapped saved files"),
+            ("unsupported", "Unsupported comparisons"),
+            ("changed_during_read", "Files changed during comparison"),
+            ("saved_git_versions", "Git-backed saved versions inspected"),
+        ] {
+            let count = summary.get(key).and_then(Value::as_u64).unwrap_or(0);
+            let _ = write!(html, "<dt>{label}</dt><dd>{count}</dd>");
+        }
+    }
+    html.push_str("</dl>");
+    if item.get("comparison_requested") != Some(&Value::Bool(true)) {
+        html.push_str("<p>Payload content comparison was not requested. Use <code>--compare-folders</code> to compare the explicitly supplied folders with the selected target.</p>");
+    } else {
+        html.push_str("<p>Same bytes are consolidation candidates for review. Differing versions need comparison; an absent target path is an addition candidate, not proof that the work is missing everywhere.</p>");
+    }
+    let (declared, available, hashes, unresolved) = dependency_counts(item);
+    html.push_str("<h3>Saved Git dependencies</h3><dl>");
+    for (label, count) in [
+        ("Declared dependencies", declared),
+        ("Saved commit objects available", available),
+        ("Saved-content fingerprint mismatches", hashes),
+        ("Unresolved dependencies", unresolved),
+    ] {
+        let _ = write!(html, "<dt>{label}</dt><dd>{count}</dd>");
+    }
+    html.push_str("</dl>");
+    if let Some(dependencies) = item.get("git_dependencies").and_then(Value::as_array) {
+        for dependency in dependencies {
+            let group = dependency
+                .get("group")
+                .map(scalar)
+                .unwrap_or_else(|| "Unnamed group".into());
+            let status = dependency
+                .get("status")
+                .map(scalar)
+                .unwrap_or_else(|| "unknown".into());
+            let _ = write!(
+                html,
+                "<p><code>{}</code>: <strong>{}</strong></p>",
+                escape(&group),
+                escape(&human_key(&status))
+            );
+        }
+    }
+    html.push_str("<p class=\"quiet\">Object availability and matched receipt hashes do not establish a self-contained checkpoint or historical completeness. Use explicit dependency capture and restoration before relying on an independent recovery copy.</p>");
+}
+
 fn render_inventory(body: &Value, html: &mut String) {
     for (key, title) in [
         ("worktrees", "Worktrees to review"),
@@ -178,6 +378,7 @@ fn render_inventory(body: &Value, html: &mut String) {
                 }
             }
             for (field, label) in [
+                ("inspection_status", "Inspection status"),
                 ("entries", "Recorded entries"),
                 ("historical_completeness", "Historical completeness"),
                 ("receipt_claims", "Receipt claims"),
@@ -187,6 +388,7 @@ fn render_inventory(body: &Value, html: &mut String) {
                 }
             }
             html.push_str("</dl>");
+            render_folder_summary(item, html);
             if let Some(blockers) = item.get("blockers").filter(|v| !is_empty(v)) {
                 html.push_str("<p class=\"label\">Blockers and limits</p>");
                 render_value(blockers, html, 0);
@@ -294,11 +496,77 @@ pub fn terminal(value: &Value) -> String {
     if let Some(command) = value.get("command").and_then(Value::as_str) {
         let _ = writeln!(out, "Command: {}", clean_terminal(command));
     }
+    terminal_inspection_summary(body, &mut out);
     terminal_value(body, &mut out, 0);
     out.push_str(
         "\nTimber does not apply changes to source worktrees. Cleanup requires separate human review.\n",
     );
     out
+}
+
+fn terminal_inspection_summary(body: &Value, out: &mut String) {
+    if let Some(scope) = body.get("scope") {
+        let _ = writeln!(
+            out,
+            "Scope: {} deeply inspected; {} listed only; {} missing locations; {} failed/partial scans.",
+            scope["deep_scanned_worktrees"],
+            scope["listed_only_worktrees"],
+            scope["missing_registrations"],
+            scope["failed_or_partial_scans"]
+        );
+        if let Some(elapsed) = body.get("elapsed_seconds") {
+            let _ = writeln!(out, "Elapsed seconds: {}", clean_terminal(&scalar(elapsed)));
+        }
+    }
+    if let Some(summary) = body.get("consolidation_summary").filter(|s| {
+        s.get("folders_analyzed") != Some(&Value::from(0))
+            && s.get("content_comparisons_requested") != Some(&Value::Bool(false))
+    }) {
+        let n = |key: &str| summary["payload"][key].as_u64().unwrap_or(0);
+        let _ = writeln!(
+            out,
+            "Saved copies: {} matching current target; {} competing versions; {} absent at proposed paths.",
+            n("same_path_identical"),
+            n("same_path_different"),
+            n("absent_at_proposed_path")
+        );
+        let _ = writeln!(
+            out,
+            "Saved-copy overlap: {} exact groups, {} extra copies (overlaps the target-match counts).",
+            summary["exact_duplicate_saved_group_count"], summary["duplicate_extra_copies"]
+        );
+    }
+    if let Some(folders) = body.get("folders").and_then(Value::as_array) {
+        for folder in folders {
+            let Some(summary) = folder.get("summary") else {
+                continue;
+            };
+            let name = folder
+                .get("path")
+                .map(scalar)
+                .unwrap_or_else(|| "Unknown folder".into());
+            let _ = writeln!(out, "\nSaved folder: {}", clean_terminal(&name));
+            if folder["comparison_requested"] == true {
+                let count = |key: &str| summary.get(key).and_then(Value::as_u64).unwrap_or(0);
+                let _ = writeln!(
+                    out,
+                    "  Matching copies: {}; competing versions: {}; absent at proposed path: {}; receipt mismatches: {}.",
+                    count("same_path_identical"),
+                    count("same_path_different"),
+                    count("absent_at_proposed_path"),
+                    count("receipt_hash_mismatch")
+                );
+            } else {
+                out.push_str("  Payload bytes were not compared; use --compare-folders.\n");
+            }
+            let (declared, available, hashes, unresolved) = dependency_counts(folder);
+            let _ = writeln!(
+                out,
+                "  Git dependencies: {declared} declared; {available} available; {hashes} content mismatches; {unresolved} unresolved."
+            );
+            out.push_str("  These are review candidates, not cleanup authorization.\n");
+        }
+    }
 }
 
 fn clean_terminal(text: &str) -> String {
@@ -318,6 +586,15 @@ fn terminal_value(value: &Value, out: &mut String, depth: usize) {
     match value {
         Value::Object(fields) if depth < 12 => {
             for (key, value) in fields {
+                if matches!(key.as_str(), "payload_rows" | "tracked_rows") && value.is_array() {
+                    let _ = writeln!(
+                        out,
+                        "{indent}{}: {} rows; use --json for full per-file evidence",
+                        clean_terminal(&human_key(key)),
+                        value.as_array().expect("array checked").len()
+                    );
+                    continue;
+                }
                 if key == "entries" && value.is_array() {
                     let items = value.as_array().expect("array checked");
                     let bytes: u64 = items

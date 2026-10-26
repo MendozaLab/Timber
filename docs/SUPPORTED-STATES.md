@@ -14,8 +14,11 @@ Version 0.1 targets macOS and Linux with a local filesystem. Windows is unsuppor
 | SHA-1 Git repositories | Supported; other Git object formats are refused in version one. |
 | Detached commit | Capture the commit identity and reconstruct independently with detached HEAD; original branch name is recorded only. |
 | Preservation folder with or without a receipt | Capture current supported files; historical completeness remains unknown. |
-| External Git dependency declared by a folder | Keep the declaration and unresolved limits separate from captured files. |
+| External Git dependency declared by a folder | Inspection checks pinned identities and, when requested, saved layer fingerprints. Explicit `import --dependency-repo` preserves supported commit/stash object closures for independent `restore-git`. |
 | Missing registered worktree | Report the missing location; do not prune or repair it. |
+| Many registered worktrees | List all registrations, deeply inspect the requested worktree by default; `--worktree` and `--all-worktrees` opt into wider scans. |
+| Recovery-folder comparison | Explicit `--compare-folders` reports same-path matches, competing versions, proposed additions and exact saved-copy overlaps without modifying originals. |
+| Unsupported or changing inspection input | Retain partial findings and exact blockers; do not imply that unknown paths were clean or redundant. |
 | Unresolved merge, rebase, cherry-pick, or similar operation | Refuse a worktree checkpoint. |
 | Submodules or nested repositories | Refuse capture; handle them separately. |
 | Sparse, shallow, or partial repository; missing objects | Refuse worktree capture; do not fetch data. |

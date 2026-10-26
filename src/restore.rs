@@ -6,13 +6,18 @@ use crate::{
     store::Store,
 };
 use anyhow::{Context, Result, ensure};
-use std::{fs, path::Path};
+use std::{collections::BTreeSet, fs, path::Path};
 
 pub fn restore(store: &Store, id: &str, to: &Path) -> Result<Verification> {
     let manifest = store.load(id)?;
     fsx::ensure_outside(to, Path::new(&manifest.source_path))?;
     if let Some(state) = &manifest.git {
         for root in &state.protected_roots {
+            fsx::ensure_outside(to, Path::new(root))?;
+        }
+    }
+    for dependency in &manifest.captured_dependencies {
+        for root in &dependency.protected_roots {
             fsx::ensure_outside(to, Path::new(root))?;
         }
     }
@@ -32,6 +37,9 @@ pub fn restore(store: &Store, id: &str, to: &Path) -> Result<Verification> {
         for entry in &state.index {
             store.get(&entry.blob)?;
         }
+    }
+    for dependency in &manifest.captured_dependencies {
+        crate::dependencies::verify(store, dependency)?;
     }
     fsx::fresh_dir(to)?;
     reconstruct(store, &manifest, to)?;
@@ -70,19 +78,29 @@ fn reconstruct(store: &Store, manifest: &Manifest, to: &Path) -> Result<()> {
         // Write only the new repository; --no-deref detaches rather than updating
         // an implicitly chosen branch.
         git::run(to, &["update-ref", "--no-deref", "HEAD", &state.head])?;
+        let object_ids = state
+            .index
+            .iter()
+            .map(|entry| entry.oid.clone())
+            .collect::<BTreeSet<_>>();
+        let mut ensured_objects = existing_blobs(to, &object_ids)?;
         let mut index_info = Vec::new();
         for entry in &state.index {
-            let bytes = store.get(&entry.blob)?;
-            let actual = String::from_utf8(git::run_input(
-                to,
-                &["hash-object", "-t", "blob", "--no-filters", "-w", "--stdin"],
-                &bytes,
-            )?)?;
-            ensure!(
-                actual.trim() == entry.oid,
-                "staged blob Git object identity mismatch: {}",
-                entry.path
-            );
+            // Most index blobs are already in the self-contained history bundle.
+            // Only newly staged objects need insertion; duplicate paths share it.
+            if ensured_objects.insert(entry.oid.clone()) {
+                let bytes = store.get(&entry.blob)?;
+                let actual = String::from_utf8(git::run_input(
+                    to,
+                    &["hash-object", "-t", "blob", "--no-filters", "-w", "--stdin"],
+                    &bytes,
+                )?)?;
+                ensure!(
+                    actual.trim() == entry.oid,
+                    "staged blob Git object identity mismatch: {}",
+                    entry.path
+                );
+            }
             index_info.extend_from_slice(
                 format!("{} {} 0\t{}\0", entry.mode, entry.oid, entry.path).as_bytes(),
             );
@@ -92,6 +110,40 @@ fn reconstruct(store: &Store, manifest: &Manifest, to: &Path) -> Result<()> {
     }
     fsx::materialize(to, &manifest.entries, |digest| store.get(digest))?;
     Ok(())
+}
+
+fn existing_blobs(repo: &Path, object_ids: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+    if object_ids.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let input = object_ids
+        .iter()
+        .map(|oid| format!("{oid}\n"))
+        .collect::<String>();
+    let output = git::run_input(repo, &["cat-file", "--batch-check"], input.as_bytes())?;
+    let text = std::str::from_utf8(&output)?;
+    let rows = text.lines().collect::<Vec<_>>();
+    ensure!(
+        rows.len() == object_ids.len(),
+        "Git object-presence response count differs"
+    );
+    let mut present = BTreeSet::new();
+    for (expected, row) in object_ids.iter().zip(rows) {
+        let fields = row.split_whitespace().collect::<Vec<_>>();
+        ensure!(
+            fields.first().copied() == Some(expected.as_str()),
+            "Git object-presence identity differs"
+        );
+        if fields.len() == 2 && fields[1] == "missing" {
+            continue;
+        }
+        ensure!(
+            fields.len() == 3 && fields[1] == "blob" && fields[2].parse::<u64>().is_ok(),
+            "unsupported staged object-presence response"
+        );
+        present.insert(expected.clone());
+    }
+    Ok(present)
 }
 
 fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verification> {
@@ -111,9 +163,16 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
             .map(|e| (e.path.clone(), e.mode.clone(), e.oid.clone()))
             .collect();
         ensure!(read_index(to)? == wanted, "restored logical index differs");
+        let object_ids = state
+            .index
+            .iter()
+            .map(|entry| entry.oid.clone())
+            .collect::<Vec<_>>();
+        let fingerprints = git::batch_blob_fingerprints(to, &object_ids)?;
         for entry in &state.index {
+            let stored = store.get(&entry.blob)?;
             ensure!(
-                git::run(to, &["cat-file", "blob", &entry.oid])? == store.get(&entry.blob)?,
+                fingerprints.get(&entry.oid) == Some(&(entry.blob.clone(), stored.len() as u64)),
                 "restored staged content differs"
             );
         }
@@ -136,8 +195,12 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
         notes.push("Folder import verifies files present at import time; historical receipts remain producer claims, not proof of former worktree completeness.".into());
     }
     if let Some(map) = &manifest.import_map {
-        if !map.git_dependencies.is_empty() {
-            notes.push(format!("{} declared external Git dependencies remain unresolved and are not captured by this folder import.", map.git_dependencies.len()));
+        let unresolved = map.git_dependencies.len() - manifest.captured_dependencies.len();
+        if unresolved != 0 {
+            notes.push(format!("{unresolved} declared external Git dependencies remain unresolved and are not captured by this folder import."));
+        }
+        if !manifest.captured_dependencies.is_empty() {
+            notes.push(format!("{} pinned Git dependencies were independently reconstructed and verified from captured bundles; restore-git can recover their staged and working layers without the original repository.", manifest.captured_dependencies.len()));
         }
     }
     Ok(Verification {
@@ -155,4 +218,8 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
         independent_backup: "unassessed".into(),
         notes,
     })
+}
+
+pub fn restore_dependency(store: &Store, id: &str, group: &str, to: &Path) -> Result<Verification> {
+    crate::dependencies::restore_dependency(store, id, group, to)
 }
