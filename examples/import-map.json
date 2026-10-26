@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "groups": {
+    "agent-navigation": "Saved navigation experiment; historical completeness unknown"
+  },
+  "files": [
+    {
+      "stored_path": "agent-navigation/untracked/navigation-notes.md",
+      "target_path": "notes/navigation-notes.md",
+      "base_sha256": null
+    }
+  ],
+  "git_dependencies": []
+}

@@ -1,0 +1,15 @@
+/target/
+/demo-output/
+*.tmp
+
+# Local correspondence, business planning, and internal authoring records.
+/private/
+/emails/
+/business/
+/docs/OUTREACH-DRAFT.md
+/docs/PUBLICATION.md
+/docs/VALIDATION.md
+/docs/CASE-STUDY.md
+/docs/ENGINEERING.md
+*.eml
+*.mbox

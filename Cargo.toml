@@ -1,0 +1,28 @@
+[package]
+name = "timber-worktrees"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Untangle dirty Git worktrees with verified checkpoints and isolated consolidation previews"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/MendozaLab/Timber"
+readme = "README.md"
+keywords = ["git", "worktree", "recovery", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "timber"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+wait-timeout = "0.2"
+
+[dev-dependencies]
