@@ -116,10 +116,11 @@ fn existing_blobs(repo: &Path, object_ids: &BTreeSet<String>) -> Result<BTreeSet
     if object_ids.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let input = object_ids
-        .iter()
-        .map(|oid| format!("{oid}\n"))
-        .collect::<String>();
+    let mut input = String::new();
+    for oid in object_ids {
+        input.push_str(oid);
+        input.push('\n');
+    }
     let output = git::run_input(repo, &["cat-file", "--batch-check"], input.as_bytes())?;
     let text = std::str::from_utf8(&output)?;
     let rows = text.lines().collect::<Vec<_>>();

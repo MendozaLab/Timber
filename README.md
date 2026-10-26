@@ -109,6 +109,8 @@ The automated checks use disposable synthetic repositories. They must not depend
 
 Read the [architecture](docs/ARCHITECTURE.md), [failure handling](docs/SAFETY.md), [supported-state matrix](docs/SUPPORTED-STATES.md), and [recorded demonstration](docs/DEMO.md) for the design and the evidence actually obtained.
 
+See the [matched inspection timing](docs/PERFORMANCE.md) for the original-versus-batched comparison, its exact executable identities, and its limits.
+
 ## License
 
 Licensed under either the [MIT license](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.

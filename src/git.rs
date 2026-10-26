@@ -177,11 +177,7 @@ pub fn batch_blob_fingerprints(
     if unique.is_empty() {
         return Ok(BTreeMap::new());
     }
-    let input = unique
-        .iter()
-        .map(|oid| format!("{oid}\n"))
-        .collect::<String>()
-        .into_bytes();
+    let input = (unique.join("\n") + "\n").into_bytes();
     let mut child = configured_command(repo, &["cat-file", "--batch"]).spawn()?;
     let mut stdin = child.stdin.take().context("missing batch input")?;
     let stdout = child.stdout.take().context("missing batch output")?;
@@ -266,11 +262,7 @@ where
     if unique.is_empty() {
         return Ok(());
     }
-    let input = unique
-        .iter()
-        .map(|oid| format!("{oid}\n"))
-        .collect::<String>()
-        .into_bytes();
+    let input = (unique.join("\n") + "\n").into_bytes();
     let mut child = configured_command(repo, &["cat-file", "--batch"]).spawn()?;
     let mut stdin = child.stdin.take().context("missing batch input")?;
     let stdout = child.stdout.take().context("missing batch output")?;
