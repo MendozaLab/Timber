@@ -58,7 +58,7 @@ fn check_private_directory(path: &Path) -> Result<()> {
     );
     ensure!(
         metadata.permissions().mode() & 0o077 == 0,
-        "store directory must be private (mode 0700): {}",
+        "store directory must be private (mode 0700): {} (a directory created beforehand with mkdir usually has mode 0755; run `chmod 700` on it, or let Timber create the store path itself)",
         path.display()
     );
     Ok(())

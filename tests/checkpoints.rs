@@ -347,3 +347,20 @@ fn manifest_protected_roots_must_include_the_absolute_source() {
     m.id = timber_worktrees::store::manifest_id(&m).unwrap();
     assert!(f.store.publish(&m).is_err());
 }
+
+#[test]
+fn refuses_pre_created_group_readable_store_with_remedy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = dir.path().join("store");
+    fs::create_dir(&store).unwrap();
+    fs::set_permissions(&store, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = Store::open(&store).unwrap_err().to_string();
+    assert!(error.contains("must be private (mode 0700)"), "{error}");
+    assert!(error.contains("chmod 700"), "{error}");
+    let fresh = dir.path().join("fresh");
+    Store::open(&fresh).unwrap();
+    assert_eq!(
+        fs::symlink_metadata(&fresh).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+}
