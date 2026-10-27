@@ -34,6 +34,14 @@ timber --json inspect --repo ./project --folder ./saved-work \
 
 Untracked counts are per file: `git status --short` collapses an untracked directory into one line, so Timber's untracked number is usually larger. Both are correct; state which one a report quotes. Progress goes to standard error; structured output stays on standard output. Scope, elapsed time, partial results and skipped worktrees are recorded. Indexed Git content is read through a streaming batch instead of launching a Git process for each tracked file. Ignored files remain metadata-only; `--compare-folders` explicitly enables reads of supplied recovery-folder payloads and their proposed current target paths.
 
+Ignored files are summarized by default: the count, the total recorded bytes, and the 20 top-level paths that contribute the most ignored entries. Add `--list-ignored` when you need every ignored path, for example to choose what to pass to `checkpoint --include-ignored`. Staged, working and untracked lists are always complete, because they are the recovery evidence. `report` shows the summary as a small table and shows the full list only when the saved JSON carries one.
+
+```sh
+timber --json inspect --repo ./project --list-ignored --out inspection-full.json
+```
+
+Inspect results now carry result `schema` 2 (it was 1). Compatibility: tools that read `inspect --json` should detect the `ignored` shape by that schema number, and in schema 2 by `scope.list_ignored`; schema 1 results always carried the full list. Checkpoint manifests and other stored records keep their own schema and are unchanged.
+
 Same-path comparisons require equal content hashes, byte lengths, file types and executable flags. Different versions need review. Absent means absent at the proposed target path, not absent everywhere. Saved-copy duplicate groups require the same proposed target and exact fingerprints. They can overlap the target-match count, so do not add them as independent cleanup candidates.
 
 Keep these classes separate:

@@ -10,6 +10,24 @@ import statistics
 import subprocess
 import time
 
+TOP_DIRS_LIMIT = 20
+
+
+def ignored_summary(value):
+    """Bounded ignored-path summary (inspect schema 2). A full list (schema 1, or
+    --list-ignored) is reduced with the same rule so both shapes compare exactly."""
+    if isinstance(value, dict):
+        return value
+    groups = {}
+    for row in value:
+        top = row["path"].split("/", 1)[0]
+        count, size = groups.get(top, (0, 0))
+        groups[top] = (count + 1, size + row.get("bytes", 0))
+    ranked = sorted(groups.items(), key=lambda item: (-item[1][0], item[0]))[:TOP_DIRS_LIMIT]
+    return {"count": len(value), "bytes": sum(row.get("bytes", 0) for row in value),
+            "top_dirs": [{"path": path, "count": count, "bytes": size}
+                         for path, (count, size) in ranked]}
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -18,8 +36,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--files", type=int, default=1000)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--ignored-files", type=int, default=0,
+                        help="extra ignored files under ignored-bulk/; 0 keeps the frozen fixture")
     args = parser.parse_args()
-    if args.output.exists() or args.files < 10 or args.repeats < 1:
+    if args.output.exists() or args.files < 10 or args.repeats < 1 or args.ignored_files < 0:
         parser.error("use a fresh output directory, at least 10 files and one repeat")
     root = args.output.resolve()
     root.mkdir(parents=True, mode=0o700)
@@ -47,7 +67,7 @@ def main():
     for index in range(args.files):
         (repo / "files" / f"{index:06}.txt").write_text(
             f"Synthetic distinct object {index}\n" + "benchmark fixture\n" * 12)
-    (repo / ".gitignore").write_text("ignored.cache\n")
+    (repo / ".gitignore").write_text("ignored.cache\n" + ("ignored-bulk/\n" if args.ignored_files else ""))
     git("add", ".")
     git("commit", "-qm", "Synthetic frozen baseline")
     (repo / "files/000000.txt").write_text("staged synthetic draft\n")
@@ -56,6 +76,10 @@ def main():
     (repo / "files/000001.txt").unlink()
     (repo / "untracked.txt").write_text("untracked synthetic input\n")
     (repo / "ignored.cache").write_text("synthetic ignored input\n")
+    for index in range(args.ignored_files):
+        shard = repo / "ignored-bulk" / f"{index // 1000:03}"
+        shard.mkdir(parents=True, exist_ok=True)
+        (shard / f"{index:06}.bin").write_text("synthetic ignored bulk\n")
 
     def fingerprint():
         files = {}
@@ -88,13 +112,15 @@ def main():
         rows = value["worktrees"]
         assert len(rows) == 1, "benchmark scope must be exactly one worktree"
         row = rows[0]
-        finding = {key: row[key] for key in ["head", "staged_paths", "working_paths", "untracked", "ignored"]}
+        finding = {key: row[key] for key in ["head", "staged_paths", "working_paths", "untracked"]}
+        finding["ignored"] = ignored_summary(row["ignored"])
         if expected is None:
             expected = finding
         assert finding == expected, f"{label} differs in inspection findings"
         assert fingerprint() == before_state, f"{label} changed a source input"
         calls.append({"variant": name, "round": round_number, "warmup": warmup,
                       "seconds": elapsed, "exit": result.returncode,
+                      "stdout_bytes": len(result.stdout),
                       "findings_match": True, "source_unchanged": True})
 
     run("before", 0, True)
@@ -107,8 +133,12 @@ def main():
                       if call["variant"] == name and not call["warmup"]]
                for name in binaries}
     medians = {name: statistics.median(times) for name, times in timings.items()}
+    output_bytes = {name: statistics.median([call["stdout_bytes"] for call in calls
+                                             if call["variant"] == name and not call["warmup"]])
+                    for name in binaries}
     record = {"schema": 1, "kind": "matched_synthetic_inspection",
               "files_requested": args.files, "indexed_paths": args.files + 1,
+              "ignored_bulk_files": args.ignored_files,
               "registered_worktrees": 1, "repeats": args.repeats,
               "warmups_per_binary": 1, "order": "alternating, before first in odd rounds",
               "binary_sha256": {name: hashlib.sha256(path.read_bytes()).hexdigest()
@@ -116,11 +146,13 @@ def main():
               "median_seconds": medians,
               "speedup_ratio": medians["before"] / medians["after"],
               "time_reduction_percent": 100 * (1 - medians["after"] / medians["before"]),
+              "median_stdout_bytes": output_bytes,
               "all_findings_match": True, "all_source_checks_unchanged": True,
               "calls": calls,
               "limits": ["Synthetic fixture only; no developer time-savings claim.",
                          "Warm-cache comparison; fixtures and measured code paths are identical.",
-                         "Timing excludes setup, source-preservation checks and human review."]}
+                         "Timing excludes setup, source-preservation checks and human review.",
+                         "Ignored findings are compared as bounded summaries, so a full-list and a summary executable match when they describe the same paths."]}
     (root / "metrics.json").write_text(json.dumps(record, indent=2) + "\n")
     print(json.dumps({key: value for key, value in record.items() if key != "calls"}, indent=2))
 

@@ -85,7 +85,8 @@ pub fn render(value: &Value) -> String {
          .quiet{color:var(--muted)}ul{padding-left:22px}li{margin:8px 0;overflow-wrap:anywhere}code,pre{font:13px/1.55 ui-monospace,monospace;overflow-wrap:anywhere}\
          pre{white-space:pre-wrap;background:var(--paper);padding:14px;border-radius:5px}dl{display:grid;grid-template-columns:minmax(100px,1fr) minmax(140px,3fr);gap:9px 16px;margin:0}\
          dt{font-weight:600}dd{margin:0;overflow-wrap:anywhere}summary{cursor:pointer;font-weight:650}details[open]>summary{margin-bottom:16px}\
-         .source{border-top:1px solid var(--line);padding-top:8px}.label{font-weight:650}footer{color:var(--muted);font-size:14px}\
+         .source{border-top:1px solid var(--line);padding-top:8px}\
+         table{border-collapse:collapse;width:100%;margin:8px 0 12px}th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);overflow-wrap:anywhere}td.num,th.num{text-align:right}.label{font-weight:650}footer{color:var(--muted);font-size:14px}\
          @media(prefers-color-scheme:dark){:root{--paper:#18221b;--ink:#e9efe6;--muted:#bac8b8;--line:#405341;--panel:#202e23;--accent:#9dc19e}.status{background:#2c4630;border-color:#56785a}}\
          @media(max-width:540px){main{padding:24px 16px}dl{display:block}dd{margin-bottom:12px}}\
          </style></head><body><main><header><div class=\"brand\">Timber!</div>\
@@ -375,6 +376,8 @@ fn render_inventory(body: &Value, html: &mut String) {
             ] {
                 if let Some(paths) = item.get(field).and_then(Value::as_array) {
                     let _ = write!(html, "<dt>{label}</dt><dd>{}</dd>", paths.len());
+                } else if let Some(count) = item.get(field).and_then(|v| v.get("count")) {
+                    let _ = write!(html, "<dt>{label}</dt><dd>{}</dd>", escape(&scalar(count)));
                 }
             }
             for (field, label) in [
@@ -388,6 +391,7 @@ fn render_inventory(body: &Value, html: &mut String) {
                 }
             }
             html.push_str("</dl>");
+            render_ignored_summary(item, html);
             render_folder_summary(item, html);
             if let Some(blockers) = item.get("blockers").filter(|v| !is_empty(v)) {
                 html.push_str("<p class=\"label\">Blockers and limits</p>");
@@ -396,6 +400,42 @@ fn render_inventory(body: &Value, html: &mut String) {
         }
         html.push_str("</section>");
     }
+}
+
+/// Inspect schema 2 carries ignored paths as a bounded summary object unless
+/// `--list-ignored` was used; a list (schema 1, or schema 2 with that flag) is
+/// rendered with the complete recorded evidence instead.
+fn render_ignored_summary(item: &Value, html: &mut String) {
+    let Some(summary) = item.get("ignored").filter(|v| v.is_object()) else {
+        return;
+    };
+    let field = |key: &str| summary.get(key).map(scalar).unwrap_or_default();
+    let _ = write!(
+        html,
+        "<h3>Ignored files summary</h3><table><thead><tr><th class=\"num\">Ignored entries</th><th class=\"num\">Bytes</th></tr></thead>\
+         <tbody><tr><td class=\"num\">{}</td><td class=\"num\">{}</td></tr></tbody></table>",
+        escape(&field("count")),
+        escape(&field("bytes"))
+    );
+    if let Some(rows) = summary
+        .get("top_dirs")
+        .and_then(Value::as_array)
+        .filter(|rows| !rows.is_empty())
+    {
+        html.push_str("<table><thead><tr><th>Top-level path</th><th class=\"num\">Entries</th><th class=\"num\">Bytes</th></tr></thead><tbody>");
+        for row in rows {
+            let cell = |key: &str| escape(&row.get(key).map(scalar).unwrap_or_default());
+            let _ = write!(
+                html,
+                "<tr><td><code>{}</code></td><td class=\"num\">{}</td><td class=\"num\">{}</td></tr>",
+                cell("path"),
+                cell("count"),
+                cell("bytes")
+            );
+        }
+        html.push_str("</tbody></table>");
+    }
+    html.push_str("<p class=\"quiet\">Bounded summary: the top-level paths with the most ignored entries. Run <code>inspect --list-ignored</code> for every path. Ignored files are not captured unless selected.</p>");
 }
 
 fn render_comparisons(body: &Value, html: &mut String) {

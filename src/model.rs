@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const SCHEMA: u32 = 1;
+/// Schema of `inspect` results. Separate from [`SCHEMA`], which governs stored
+/// manifests, plans and receipts and is unchanged by output-shape revisions.
+/// Version 2: each scanned worktree's `ignored` is a bounded summary object
+/// (`count`, `bytes`, `top_dirs`) unless `scope.list_ignored` is true, in which
+/// case it is the complete per-path list that version 1 always carried.
+pub const INSPECT_SCHEMA: u32 = 2;
 /// `Exclusion::reason` for a path the operator named with `checkpoint --exclude`.
 /// Declared per run; never remembered or inferred.
 pub const EXCLUDED_BY_OPERATOR: &str = "excluded_by_operator";

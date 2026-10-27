@@ -1,7 +1,7 @@
 //! Source reads only; never ask Git to refresh an index or run content filters.
 use crate::{
     fsx, git,
-    model::{Entry, EntryKind},
+    model::{Entry, EntryKind, INSPECT_SCHEMA},
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -19,6 +19,37 @@ pub struct InspectOptions {
     pub all_worktrees: bool,
     pub worktrees: Vec<PathBuf>,
     pub compare_folders: bool,
+    /// Emit every ignored path instead of the bounded summary.
+    pub list_ignored: bool,
+}
+
+/// Most top-level paths an ignored-file summary names.
+pub const IGNORED_TOP_DIRS_LIMIT: usize = 20;
+
+/// Bounded view of ignored-path rows: total entries, total recorded bytes, and the
+/// top-level paths (first path component) contributing the most entries, ordered by
+/// entry count descending, then path. Bytes are the `bytes` recorded per row; a
+/// collapsed directory contributes its directory entry size, not its contents.
+pub fn ignored_summary(rows: &[Value]) -> Value {
+    let mut groups = BTreeMap::<&str, (u64, u64)>::new();
+    let mut total = 0u64;
+    for row in rows {
+        let bytes = row["bytes"].as_u64().unwrap_or(0);
+        total = total.saturating_add(bytes);
+        let path = row["path"].as_str().unwrap_or_default();
+        let top = path.split('/').next().unwrap_or(path);
+        let group = groups.entry(top).or_default();
+        group.0 += 1;
+        group.1 = group.1.saturating_add(bytes);
+    }
+    let mut top = groups.into_iter().collect::<Vec<_>>();
+    top.sort_by(|a, b| b.1.0.cmp(&a.1.0).then_with(|| a.0.cmp(b.0)));
+    let top_dirs = top
+        .into_iter()
+        .take(IGNORED_TOP_DIRS_LIMIT)
+        .map(|(path, (count, bytes))| json!({"path":path,"count":count,"bytes":bytes}))
+        .collect::<Vec<_>>();
+    json!({"count":rows.len(),"bytes":total,"top_dirs":top_dirs})
 }
 
 pub fn paths(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
@@ -82,6 +113,8 @@ fn file_info(root: &Path, path: &str) -> Value {
     }
 }
 
+/// Deep inspection of one worktree. `ignored` is always the complete per-path list
+/// here; `inspect_with_options` bounds it for output unless `list_ignored` is set.
 pub fn worktree(path: &Path) -> Result<Value> {
     let started = Instant::now();
     let head = git::text(path, &["rev-parse", "--verify", "HEAD"])?;
@@ -403,8 +436,13 @@ pub fn inspect_with_options(
                 scanned + failed + 1
             );
             match worktree(root) {
-                Ok(v) => {
+                Ok(mut v) => {
                     scanned += 1;
+                    if !options.list_ignored {
+                        if let Some(rows) = v["ignored"].as_array() {
+                            v["ignored"] = ignored_summary(rows);
+                        }
+                    }
                     if v["inspection_status"] == "partial" {
                         failed += 1;
                     }
@@ -464,11 +502,16 @@ pub fn inspect_with_options(
     eprintln!(
         "Timber: inspection finished; {scanned} worktrees scanned, {skipped} listed only, {missing} missing registrations."
     );
+    let ignored_note = if options.list_ignored {
+        "Ignored files are listed from metadata (--list-ignored)."
+    } else {
+        "Ignored files are summarized from metadata: count, bytes and the top-level paths with the most entries. Use --list-ignored for every path."
+    };
     Ok(json!({
-        "schema":1,"repo":repo,"target_worktree":target_root,"status":if failed==0 {"complete"}else{"partial"},"worktrees":worktrees,"folders":preserved,
-        "scope":{"mode":if options.all_worktrees {"all_worktrees"}else{"selected_worktrees"},"registered_worktrees":worktrees.len(),"deep_scanned_worktrees":scanned,"listed_only_worktrees":skipped,"missing_registrations":missing,"metadata_prune_candidates":prune_candidates,"failed_or_partial_scans":failed,"compare_folder_contents":options.compare_folders},
+        "schema":INSPECT_SCHEMA,"repo":repo,"target_worktree":target_root,"status":if failed==0 {"complete"}else{"partial"},"worktrees":worktrees,"folders":preserved,
+        "scope":{"mode":if options.all_worktrees {"all_worktrees"}else{"selected_worktrees"},"registered_worktrees":worktrees.len(),"deep_scanned_worktrees":scanned,"listed_only_worktrees":skipped,"missing_registrations":missing,"metadata_prune_candidates":prune_candidates,"failed_or_partial_scans":failed,"compare_folder_contents":options.compare_folders,"list_ignored":options.list_ignored},
         "registration_stable":registration_stable,"elapsed_seconds":started.elapsed().as_secs_f64(),"consolidation_summary":consolidation_summary,
-        "notes":["Inspection never prunes, moves, stages, commits, or deletes source work.","Default scope deeply inspects the requested worktree only; other registrations are listed without scanning their files.","Ignored files are listed from metadata. Recovery-folder payload comparison requires --compare-folders.","Changed registrations or partial scans require review; no result authorizes cleanup."]
+        "notes":["Inspection never prunes, moves, stages, commits, or deletes source work.","Default scope deeply inspects the requested worktree only; other registrations are listed without scanning their files.",ignored_note,"Recovery-folder payload comparison requires --compare-folders.","Changed registrations or partial scans require review; no result authorizes cleanup."]
     }))
 }
 

@@ -26,3 +26,7 @@ Agents and scripts that consume the JSON pay the full cost on every run, and a r
 ## Acceptance
 
 `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings` and `cargo test --locked` pass; the field case that produced a 39 MB JSON result produces a result under 2 MB in the default mode with the same staged, working and untracked lists.
+
+## Implementation note (2026-10-27)
+
+The inspect result `schema` moved to 2 through a separate `INSPECT_SCHEMA` constant; stored manifests, plans and receipts keep schema 1, and the command envelope is unchanged. Because a schema 2 result can carry either shape, `scope.list_ignored` records which one was requested. The summary is computed from the same full list that inspection already builds internally, so nothing inside Timber lost information: capture, planning and assess enumerate ignored paths themselves, and the nested-repository classification uses `git check-ignore`. The default summary equals the summary of the `--list-ignored` list (regression-tested). The field case under 2 MB is not measured here; see `docs/PERFORMANCE.md`.

@@ -51,6 +51,9 @@ enum Commands {
         /// Compare saved payload bytes and Git-backed tracked versions against the selected target.
         #[arg(long)]
         compare_folders: bool,
+        /// List every ignored path; default reports count, bytes and top-level paths only.
+        #[arg(long)]
+        list_ignored: bool,
     },
     /// Capture supported Git and filesystem state. Does not stage or commit the source.
     Checkpoint {
@@ -214,11 +217,13 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             all_worktrees,
             worktree,
             compare_folders,
+            list_ignored,
         } => {
             let options = inspect::InspectOptions {
                 all_worktrees: *all_worktrees,
                 worktrees: worktree.clone(),
                 compare_folders: *compare_folders,
+                list_ignored: *list_ignored,
             };
             let result = inspect::inspect_with_options(repo, folder, &options)?;
             if result["status"] == "partial" {

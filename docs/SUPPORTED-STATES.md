@@ -10,7 +10,7 @@ Version 0.1 targets macOS and Linux with a local filesystem. Windows is unsuppor
 | Staged contents different from working contents | Capture both versions; preview selects one layer. |
 | Tracked deletions | Preserve their absence and logical index state. |
 | Untracked files | Capture; integration requires explicit extra-file selection. |
-| Ignored files | List; capture only explicitly selected paths; report omissions. |
+| Ignored files | `inspect` summarizes them by default (count, total bytes, and the 20 top-level paths with the most entries); `inspect --list-ignored` lists every path. Capture only explicitly selected paths; report omissions. |
 | SHA-1 Git repositories | Supported; other Git object formats are refused in version one. |
 | Detached commit | Capture the commit identity and reconstruct independently with detached HEAD; original branch name is recorded only. |
 | Preservation folder with or without a receipt | Capture current supported files; historical completeness remains unknown. |
@@ -29,6 +29,10 @@ Version 0.1 targets macOS and Linux with a local filesystem. Windows is unsuppor
 | Non-UTF-8 filenames or filesystem collisions | Refuse with the affected path. |
 | Custom or union merge driver | Refuse preview semantics that the isolated engine does not support. |
 | Existing restoration or preview directory | Refuse overwrite. |
+
+## Inspect output schema
+
+`inspect` results carry `"schema": 2` inside the command result. In schema 2, each scanned worktree's `ignored` field is a bounded summary object, `{"count", "bytes", "top_dirs": [{"path", "count", "bytes"}]}`, with at most 20 top-level paths ordered by entry count, then path; with `--list-ignored` it is the complete per-path list, and `scope.list_ignored` is `true`. Staged, working and untracked lists are complete in both modes. Schema 1 results always carried the full list. Compatibility: consumers detect the shape by the schema number (and, for schema 2, `scope.list_ignored`), never by guessing. Stored manifests, plans and receipts keep their own schema 1; the command envelope's `schema` is also unchanged.
 
 The recovery guarantee concerns the supported captured paths, contents, symlink targets, executable bits, logical staged index, and recorded base commit. It does not preserve running processes, application state, credentials held in memory, open database transactions, ownership, access-control lists, arbitrary extended attributes, resource forks, hardlink topology, or every filesystem timestamp.
 

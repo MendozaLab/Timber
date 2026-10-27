@@ -62,6 +62,41 @@ The release executables are bound to these source revisions and SHA-256 digests:
 
 The debug and release tables are separate observations with their own frozen executables. Do not interpret the difference between those tables as an isolated effect of compiler optimization: they were separate runs under uncontrolled background load. Neither table measures developer productivity or guarantees timings for real repositories.
 
+## Bounded ignored output (inspect schema 2)
+
+A matched run on 2026-10-27 compared release builds of the full-list inspection (`ignored` as a per-path list) and the default summary mode (`ignored` as count, bytes and at most 20 top-level paths). Same procedure as above: one unmeasured warmup each, three measured rounds in alternating order, every source-preservation check passed and every invocation exited successfully. The script compares ignored findings by reducing a full list to the same bounded summary, so both executables had to describe exactly the same ignored paths, bytes and top-level groups. Recorded on macOS 26.5.2 (arm64), Git 2.51.1.
+
+**Frozen fixture** (the 1,001-path fixture above, one ignored file):
+
+| Variant | Median wall time | Median JSON output |
+|---|---:|---:|
+| Full ignored list (schema 1) | 0.376922 seconds | 4,040 bytes |
+| Bounded summary (schema 2 default) | 0.372961 seconds | 4,224 bytes |
+
+The time difference is within run-to-run noise; no speed claim follows. With one ignored file the summary is slightly larger, because the summary object, the `scope.list_ignored` flag and the longer note outweigh a one-row list.
+
+**Same fixture plus 20,000 ignored files** (`--ignored-files 20000`, one ignored folder):
+
+| Variant | Median wall time | Median JSON output |
+|---|---:|---:|
+| Full ignored list (schema 1) | 0.573328 seconds | 3,364,069 bytes |
+| Bounded summary (schema 2 default) | 0.529376 seconds | 4,387 bytes |
+
+On this fixture the default JSON result is about 767 times smaller (99.87% fewer bytes). Staged, working and untracked findings matched in every run. Output size varies by a few bytes between runs because elapsed times are recorded. The wall-time difference is small and not separated from noise; the result here is output size, not speed.
+
+| Measured round | Frozen: list seconds | Frozen: summary seconds | 20,000 ignored: list seconds | 20,000 ignored: summary seconds |
+|---|---:|---:|---:|---:|
+| 1, list first | 0.391947 | 0.368821 | 0.586608 | 0.529376 |
+| 2, summary first | 0.363660 | 0.402154 | 0.573328 | 0.741151 |
+| 3, list first | 0.376922 | 0.372961 | 0.564779 | 0.511651 |
+
+| Variant | Source revision | Executable digest |
+|---|---|---|
+| Full ignored list release | `0eabb16` | `631b951dc3219122f2513892f90c4bab4236112bcd0f4c3f8d5d42eb2a4dfb9a` |
+| Bounded summary release | uncommitted working tree carrying this change, on `0eabb16` sources | `0c80834ceab3bdcf18509c257550e8c71ee324fc8c4b8a5948aaf4040556f319` |
+
+Not measured here: the field repository whose main worktree ignores 73,925 paths and produced a 39 MB JSON result. It is a private source and was not available to this run, so the acceptance target of under 2 MB for that case is unverified. The synthetic size check above is the only size evidence recorded here. Report (HTML) size and rendering time were not benchmarked.
+
 ## Reproduce
 
 Build and retain the two executables with the **same build profile**, then run from the project root. For a release-mode comparison, build both source revisions with `cargo build --release --locked` and retain the resulting `timber` executables:
@@ -73,6 +108,8 @@ python3 examples/benchmark_inspection.py \
   --output private/benchmark-new-run \
   --files 1000 --repeats 3
 ```
+
+Add `--ignored-files 20000` to repeat the bounded-output size check; the default of 0 keeps the frozen fixture unchanged. Ignored findings are compared as bounded summaries, so a full-list executable and a summary executable can be compared directly.
 
 The script refuses an existing output directory. It creates only synthetic data, retains individual outputs and timings, and reports failures rather than silently omitting them. Output under `private/` is ignored.
 

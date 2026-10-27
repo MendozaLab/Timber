@@ -254,7 +254,21 @@ fn ignored_nested_git_directory_markers_are_listed_without_traversal_or_capture(
     );
     let before = fs::read(repo.join(".git/index")).unwrap();
     let nested_config = fs::read(nested.join(".git/config")).unwrap();
-    let result = inspect::inspect(&repo, &[]).unwrap();
+    let summary = inspect::inspect(&repo, &[]).unwrap();
+    assert_eq!(
+        summary["worktrees"][0]["ignored"]["top_dirs"][0]["path"],
+        "nested-cache"
+    );
+    assert_eq!(summary["worktrees"][0]["ignored"]["count"], 1);
+    let result = inspect::inspect_with_options(
+        &repo,
+        &[],
+        &InspectOptions {
+            list_ignored: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
     assert_eq!(result["status"], "complete");
     assert_eq!(result["worktrees"][0]["inspection_status"], "scanned");
     let ignored = result["worktrees"][0]["ignored"].as_array().unwrap();
