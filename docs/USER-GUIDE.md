@@ -53,6 +53,14 @@ A worktree checkpoint preserves committed history, the logical staged index, cur
 
 `--include-ignored` accepts source-relative paths or directory prefixes. Review what you include: ignored material can be valuable source data, credentials, or large caches. Timber does not send it to a provider.
 
+A nested repository below the worktree (a folder with its own `.git` directory or file) makes `checkpoint` refuse the whole worktree; `inspect` lists each one as a blocker first. Handle real nested repositories separately. When a nested repository sits inside a folder you have decided is disposable, name that folder for this run:
+
+```sh
+timber --store ./timber-store checkpoint ./agent-navigation --exclude test-output --exclude build/tmp
+```
+
+`--exclude` is repeatable and takes paths relative to the worktree. Timber skips each path and everything below it, and records it in the manifest as `excluded_by_operator`; `verify` and `restore` print the excluded paths, so a partial capture cannot pass for a complete one. Only untracked or ignored paths can be excluded: Timber refuses, naming the path, an exclusion that covers a tracked path (whether or not it has staged or working changes), matches nothing, passes through a symbolic link, or overlaps another exclusion or an `--include-ignored` selection. The decision is yours and lasts for one run; Timber never remembers an exclusion or guesses that something is disposable. Inspection takes no `--exclude` and keeps reporting the nested repository.
+
 Pause your writers when possible. `--writers-paused` records your declaration; it does not enforce a lock against editors or agents. Matching capture scans establish observed stability, not proof that no concurrent write occurred.
 
 ```sh

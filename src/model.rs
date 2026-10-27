@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const SCHEMA: u32 = 1;
+/// `Exclusion::reason` for a path the operator named with `checkpoint --exclude`.
+/// Declared per run; never remembered or inferred.
+pub const EXCLUDED_BY_OPERATOR: &str = "excluded_by_operator";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
@@ -162,5 +165,9 @@ pub struct Verification {
     pub verified: bool,
     pub historical_completeness: String,
     pub independent_backup: String,
+    /// Paths the operator excluded at capture; absent from the checkpoint and any restore.
+    /// Defaults to empty so verification records written before this field still load.
+    #[serde(default)]
+    pub excluded_by_operator: Vec<String>,
     pub notes: Vec<String>,
 }

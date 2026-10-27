@@ -4,7 +4,7 @@ use crate::{
     model::*,
     store::{Store, manifest_id, valid_oid, validate_import_map},
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File},
@@ -173,6 +173,8 @@ pub fn validate_worktree(path: &Path) -> Result<()> {
 }
 
 fn ignored_paths(path: &Path) -> Result<BTreeSet<String>> {
+    // Git collapses an ignored nested repository into one `dir/` record. Remove only
+    // that terminal marker so the recorded omission is a canonical relative path.
     Ok(nul_strings(&git::run(
         path,
         &[
@@ -184,6 +186,7 @@ fn ignored_paths(path: &Path) -> Result<BTreeSet<String>> {
         ],
     )?)?
     .into_iter()
+    .map(|p| p.strip_suffix('/').map(str::to_owned).unwrap_or(p))
     .collect())
 }
 fn included(path: &str, selectors: &[String]) -> bool {
@@ -194,6 +197,130 @@ fn included(path: &str, selectors: &[String]) -> bool {
                 .is_some_and(|suffix| suffix.starts_with('/'))
     })
 }
+/// True when a tracked path's current working bytes, type or executable bit differ
+/// from its index entry, or cannot be read to prove otherwise.
+fn working_differs(
+    source: &Path,
+    path: &str,
+    mode: &str,
+    expected: Option<&(String, u64)>,
+) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(source.join(path)) else {
+        return true;
+    };
+    let symlink = metadata.file_type().is_symlink();
+    if !(symlink || metadata.is_file()) || fsx::is_placeholder(&metadata) {
+        return true;
+    }
+    let executable = std::os::unix::fs::PermissionsExt::mode(&metadata.permissions()) & 0o111 != 0;
+    if (mode == "120000") != symlink
+        || (mode == "100755" && !executable)
+        || (mode == "100644" && executable)
+    {
+        return true;
+    }
+    let entry = Entry {
+        path: path.to_owned(),
+        kind: if symlink {
+            EntryKind::Symlink
+        } else {
+            EntryKind::File
+        },
+        mode: 0,
+        size: 0,
+        sha256: String::new(),
+    };
+    fsx::fingerprint(source, &entry)
+        .map(|observed| Some(&observed) != expected)
+        .unwrap_or(true)
+}
+
+/// Validates every `--exclude` before the store is touched. An exclusion must name an
+/// existing path, reached without following a symbolic link, that holds no tracked
+/// path. Tracked paths are refused even when clean: their history and index are
+/// captured anyway, and a missing working copy would read as a deletion in previews.
+fn operator_exclusions(
+    source: &Path,
+    exclude: &[String],
+    include_ignored: &[String],
+) -> Result<Vec<String>> {
+    let mut selectors: Vec<String> = Vec::new();
+    for raw in exclude {
+        let selector = raw.trim_end_matches('/').to_owned();
+        fsx::validate_relative(&selector)
+            .with_context(|| format!("invalid --exclude path: {raw:?}"))?;
+        for earlier in &selectors {
+            ensure!(
+                !included(&selector, std::slice::from_ref(earlier))
+                    && !included(earlier, std::slice::from_ref(&selector)),
+                "--exclude paths repeat or overlap: {earlier} and {selector}"
+            );
+        }
+        for chosen in include_ignored {
+            let chosen = chosen.trim_end_matches('/').to_owned();
+            ensure!(
+                !included(&chosen, std::slice::from_ref(&selector))
+                    && !included(&selector, std::slice::from_ref(&chosen)),
+                "path is both excluded and selected with --include-ignored: {selector} and {chosen}"
+            );
+        }
+        selectors.push(selector);
+    }
+    if selectors.is_empty() {
+        return Ok(selectors);
+    }
+    let index = crate::inspect::index(source)?;
+    let head = crate::inspect::head_tree(source)?;
+    for selector in &selectors {
+        let scope = std::slice::from_ref(selector);
+        let tracked = index
+            .keys()
+            .chain(head.keys())
+            .filter(|p| included(p, scope))
+            .collect::<BTreeSet<_>>();
+        if let Some(first) = tracked.first() {
+            let oids = tracked
+                .iter()
+                .filter_map(|p| index.get(*p))
+                .filter(|(mode, _)| mode != "160000")
+                .map(|(_, oid)| oid.clone())
+                .collect::<Vec<_>>();
+            let fingerprints = git::batch_blob_fingerprints(source, &oids)?;
+            let changed = tracked.iter().find(|p| match index.get(**p) {
+                None => true,
+                Some(entry) if head.get(**p) != Some(entry) => true,
+                Some((mode, oid)) => working_differs(source, p, mode, fingerprints.get(oid)),
+            });
+            match changed {
+                Some(path) => bail!(
+                    "--exclude refused for tracked path with staged or working changes: {path} (named by --exclude {selector})"
+                ),
+                None => bail!(
+                    "--exclude refused for tracked path: {first} (named by --exclude {selector}); exclusion applies only to untracked or ignored paths"
+                ),
+            }
+        }
+        let mut current = source.to_path_buf();
+        let parts = selector.split('/').collect::<Vec<_>>();
+        for (position, part) in parts.iter().enumerate() {
+            current.push(part);
+            let exists = match fs::symlink_metadata(&current) {
+                Ok(m) => position + 1 == parts.len() || (m.is_dir() && !m.file_type().is_symlink()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("--exclude path unavailable: {selector}"));
+                }
+            };
+            ensure!(
+                exists,
+                "--exclude matches no path in the worktree: {selector}"
+            );
+        }
+    }
+    Ok(selectors)
+}
+
 fn persist_entries(store: &Store, source: &Path, entries: &[Entry]) -> Result<()> {
     for entry in entries {
         if entry.kind != EntryKind::Directory {
@@ -218,9 +345,31 @@ pub fn checkpoint(
     include_ignored: &[String],
     writers_paused: bool,
 ) -> Result<Manifest> {
+    checkpoint_with_exclusions(store, path, include_ignored, &[], writers_paused)
+}
+
+/// Capture with explicit per-run operator exclusions (`checkpoint --exclude`). Each
+/// excluded path is skipped entirely and recorded as `excluded_by_operator`. Without
+/// exclusions this is exactly [`checkpoint`]: a nested repository still refuses.
+pub fn checkpoint_with_exclusions(
+    store: &Store,
+    path: &Path,
+    include_ignored: &[String],
+    exclude: &[String],
+    writers_paused: bool,
+) -> Result<Manifest> {
     let source = path.canonicalize()?;
     fsx::ensure_outside(&store.root, &source)?;
     validate_worktree(&source)?;
+    let operator = operator_exclusions(&source, exclude, include_ignored)?;
+    let pruned = std::cell::RefCell::new(BTreeSet::new());
+    let prune = |p: &str| {
+        let hit = operator.iter().find(|x| x.as_str() == p);
+        if let Some(x) = hit {
+            pruned.borrow_mut().insert(x.clone());
+        }
+        hit.is_some()
+    };
     let protected_roots = git::protected_roots(&source)?;
     for root in &protected_roots {
         fsx::ensure_outside(&store.root, root)?;
@@ -242,7 +391,13 @@ pub fn checkpoint(
         );
     }
     let exclude = |p: &str| ignored.contains(p) && !included(p, &selectors);
-    let entries = fsx::inventory_filtered(&source, |p| !exclude(p))?;
+    let entries = fsx::inventory_pruned(&source, prune, |p| !exclude(p))?;
+    for selector in &operator {
+        ensure!(
+            pruned.borrow().contains(selector),
+            "--exclude matched nothing during capture: {selector}"
+        );
+    }
     let head = git::text(&source, &["rev-parse", "--verify", "HEAD"])?;
     let branch = git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok();
     let index_before = read_index(&source)?;
@@ -276,7 +431,7 @@ pub fn checkpoint(
     git::run(&source, &["bundle", "create", bundle_str, "HEAD"])?;
     let bundle = store.put(&fs::read(&bundle_path)?)?;
     ensure!(
-        entries == fsx::inventory_filtered(&source, |p| !exclude(p))?,
+        entries == fsx::inventory_pruned(&source, prune, |p| !exclude(p))?,
         "working files changed during capture; checkpoint remains incomplete"
     );
     ensure!(
@@ -310,13 +465,23 @@ pub fn checkpoint(
         .collect::<Result<Vec<_>>>()?;
     protected_roots.sort();
     protected_roots.dedup();
-    let excluded = ignored
-        .into_iter()
-        .filter(|p| !included(p, &selectors))
+    // Operator exclusions come first. Ignored omissions keep their own records, even
+    // below an excluded path, so later assessment compares like with like.
+    let excluded = operator
+        .iter()
         .map(|path| Exclusion {
-            path,
-            reason: "ignored file not explicitly selected".into(),
+            path: path.clone(),
+            reason: EXCLUDED_BY_OPERATOR.into(),
         })
+        .chain(
+            ignored
+                .into_iter()
+                .filter(|p| !included(p, &selectors))
+                .map(|path| Exclusion {
+                    path,
+                    reason: "ignored file not explicitly selected".into(),
+                }),
+        )
         .collect();
     let mut manifest = Manifest {
         schema: SCHEMA,

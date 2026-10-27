@@ -2,7 +2,7 @@
 use crate::{
     capture::read_index,
     fsx, git,
-    model::{Manifest, SCHEMA, Verification},
+    model::{EXCLUDED_BY_OPERATOR, Manifest, SCHEMA, Verification},
     store::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -192,6 +192,18 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
             manifest.excluded.len()
         ));
     }
+    let excluded_by_operator = manifest
+        .excluded
+        .iter()
+        .filter(|x| x.reason == EXCLUDED_BY_OPERATOR)
+        .map(|x| x.path.clone())
+        .collect::<Vec<_>>();
+    if !excluded_by_operator.is_empty() {
+        notes.push(format!(
+            "Partial capture: the operator excluded {} paths at checkpoint time; they and everything below them are absent from this checkpoint and from any restore. See excluded_by_operator.",
+            excluded_by_operator.len()
+        ));
+    }
     if manifest.source_kind == "folder" {
         notes.push("Folder import verifies files present at import time; historical receipts remain producer claims, not proof of former worktree completeness.".into());
     }
@@ -217,6 +229,7 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
         }
         .into(),
         independent_backup: "unassessed".into(),
+        excluded_by_operator,
         notes,
     })
 }

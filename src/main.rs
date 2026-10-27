@@ -57,6 +57,10 @@ enum Commands {
         worktree: PathBuf,
         #[arg(long)]
         include_ignored: Vec<String>,
+        /// Skip a disposable untracked or ignored path for this run only (repeatable,
+        /// relative to the worktree). Recorded as excluded_by_operator; never remembered.
+        #[arg(long)]
+        exclude: Vec<String>,
         #[arg(long)]
         writers_paused: bool,
     },
@@ -235,13 +239,20 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
         Commands::Checkpoint {
             worktree,
             include_ignored,
+            exclude,
             writers_paused,
         } => {
             let roots = timber_worktrees::git::protected_roots(worktree)?;
             protect_output(Some(&store_path), &roots)?;
             protect_output(cli.out.as_deref(), &roots)?;
             let store = Store::open(&store_path)?;
-            let manifest = capture::checkpoint(&store, worktree, include_ignored, *writers_paused)?;
+            let manifest = capture::checkpoint_with_exclusions(
+                &store,
+                worktree,
+                include_ignored,
+                exclude,
+                *writers_paused,
+            )?;
             let verification = restore::verify(&store, &manifest.id)?;
             (
                 "checkpoint",

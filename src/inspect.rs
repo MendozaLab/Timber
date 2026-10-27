@@ -40,6 +40,10 @@ pub fn paths(repo: &Path, args: &[&str]) -> Result<Vec<String>> {
 pub fn index(repo: &Path) -> Result<BTreeMap<String, (String, String)>> {
     records(&git::run(repo, &["ls-files", "--stage", "-z"])?, true)
 }
+/// Committed tree entries of HEAD, keyed by path, as (mode, object identity).
+pub fn head_tree(repo: &Path) -> Result<BTreeMap<String, (String, String)>> {
+    records(&git::run(repo, &["ls-tree", "-r", "-z", "HEAD"])?, false)
+}
 fn records(data: &[u8], index: bool) -> Result<BTreeMap<String, (String, String)>> {
     let mut entries = BTreeMap::new();
     for record in data.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -82,7 +86,7 @@ pub fn worktree(path: &Path) -> Result<Value> {
     let started = Instant::now();
     let head = git::text(path, &["rev-parse", "--verify", "HEAD"])?;
     let index = index(path)?;
-    let base = records(&git::run(path, &["ls-tree", "-r", "-z", "HEAD"])?, false)?;
+    let base = head_tree(path)?;
     let mut staged = Vec::new();
     for name in index.keys().chain(base.keys()).collect::<BTreeSet<_>>() {
         if index.get(name) != base.get(name) {
@@ -91,9 +95,9 @@ pub fn worktree(path: &Path) -> Result<Value> {
     }
     let mut working = Vec::new();
     let mut unknown = Vec::new();
-    let mut blockers = Vec::new();
+    let mut blockers: Vec<Value> = Vec::new();
     if let Err(error) = crate::capture::validate_worktree(path) {
-        blockers.push(format!("Checkpoint unavailable: {error:#}"));
+        blockers.push(format!("Checkpoint unavailable: {error:#}").into());
     }
     let requested: Vec<_> = index
         .values()
@@ -107,7 +111,7 @@ pub fn worktree(path: &Path) -> Result<Value> {
     let mut compared = 0usize;
     for (name, (mode, oid)) in &index {
         if mode == "160000" {
-            blockers.push(format!("submodule unsupported: {name}"));
+            blockers.push(format!("submodule unsupported: {name}").into());
             unknown.push(name.clone());
             continue;
         }
@@ -119,12 +123,12 @@ pub fn worktree(path: &Path) -> Result<Value> {
             }
             Err(e) => {
                 unknown.push(name.clone());
-                blockers.push(format!("working file metadata unavailable: {name:?}: {e}"));
+                blockers.push(format!("working file metadata unavailable: {name:?}: {e}").into());
                 continue;
             }
         };
         if fsx::is_placeholder(&metadata) {
-            blockers.push(format!("cloud placeholder: {name}"));
+            blockers.push(format!("cloud placeholder: {name}").into());
             unknown.push(name.clone());
             continue;
         }
@@ -147,9 +151,7 @@ pub fn worktree(path: &Path) -> Result<Value> {
             Ok(observed) => observed,
             Err(error) => {
                 unknown.push(name.clone());
-                blockers.push(format!(
-                    "working file read unavailable: {name:?}: {error:#}"
-                ));
+                blockers.push(format!("working file read unavailable: {name:?}: {error:#}").into());
                 continue;
             }
         };
@@ -195,6 +197,20 @@ pub fn worktree(path: &Path) -> Result<Value> {
     if !unknown_metadata.is_empty() {
         blockers.push("Some untracked/ignored metadata became unavailable during inspection; those entries remain unknown.".into());
     }
+    let nested_scan_complete = match nested_repository_blocker(path, &index, &base) {
+        Ok(Some(blocker)) => {
+            blockers.push(blocker);
+            true
+        }
+        Ok(None) => true,
+        Err(error) => {
+            blockers.push(
+                format!("Nested repository scan unavailable; checkpoint may refuse this worktree: {error:#}")
+                    .into(),
+            );
+            false
+        }
+    };
     let head_after = git::text(path, &["rev-parse", "--verify", "HEAD"])?;
     let index_after = self::index(path)?;
     let git_identity_stable = head == head_after && index == index_after;
@@ -204,13 +220,79 @@ pub fn worktree(path: &Path) -> Result<Value> {
         );
     }
     Ok(json!({
-        "path":path,"kind":"registered_worktree","inspection_status":if unknown.is_empty() && unknown_metadata.is_empty() && git_identity_stable {"scanned"}else{"partial"},
+        "path":path,"kind":"registered_worktree","inspection_status":if unknown.is_empty() && unknown_metadata.is_empty() && git_identity_stable && nested_scan_complete {"scanned"}else{"partial"},
         "head":head,"staged_paths":staged,"working_paths":working,"unknown_working_paths":unknown,
         "untracked":untracked,"ignored":ignored,"unknown_metadata_paths":unknown_metadata,
         "blockers":blockers,"git_identity_stable":git_identity_stable,"writer_exclusion_enforced":false,
         "statistics":{"index_paths":index.len(),"git_blob_objects_requested":requested.len(),"unique_index_blob_objects":unique_count,"cat_file_batch_processes":usize::from(!requested.is_empty()),"working_files_compared":compared,"elapsed_seconds":started.elapsed().as_secs_f64()},
         "note":"Working differences compare raw bytes without clean filters or index refresh. Per-file stable reads and unchanged HEAD/index do not establish a frozen snapshot or permission to clean up."
     }))
+}
+
+/// Message carried by the nested-repository blocker in JSON, terminal and HTML views.
+pub const NESTED_REPOSITORIES_MESSAGE: &str =
+    "checkpoint will refuse this worktree until nested repositories are handled";
+
+/// Lists every nested repository below the worktree (a directory holding its own
+/// `.git` directory or file) without reading its contents, and classifies each path
+/// as tracked, ignored or untracked. Classification spends one Git process, and only
+/// when a nested repository exists.
+fn nested_repository_blocker(
+    root: &Path,
+    index: &BTreeMap<String, (String, String)>,
+    base: &BTreeMap<String, (String, String)>,
+) -> Result<Option<Value>> {
+    let found = fsx::nested_repositories(root)?;
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let covers = |repository: &str, path: &str| {
+        path == repository
+            || path
+                .strip_prefix(repository)
+                .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let tracked = found
+        .iter()
+        .filter(|r| index.keys().chain(base.keys()).any(|p| covers(r, p)))
+        .collect::<BTreeSet<_>>();
+    let mut input = Vec::new();
+    for repository in found.iter().filter(|r| !tracked.contains(r)) {
+        input.extend_from_slice(repository.as_bytes());
+        input.push(0);
+    }
+    let mut ignored = BTreeSet::new();
+    if !input.is_empty() {
+        // check-ignore exits 1 when no supplied path is ignored.
+        let output = git::output(root, &["check-ignore", "-z", "--stdin"], Some(&input))?;
+        ensure!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "Git check-ignore failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        for record in output.stdout.split(|b| *b == 0).filter(|r| !r.is_empty()) {
+            ignored
+                .insert(String::from_utf8(record.to_vec()).context("non-UTF-8 path unsupported")?);
+        }
+    }
+    let repositories = found
+        .iter()
+        .map(|r| {
+            let tracking = if tracked.contains(r) {
+                "tracked"
+            } else if ignored.contains(r) {
+                "ignored"
+            } else {
+                "untracked"
+            };
+            json!({"path":r,"tracking":tracking})
+        })
+        .collect::<Vec<_>>();
+    Ok(Some(json!({
+        "kind":"nested_repositories","message":NESTED_REPOSITORIES_MESSAGE,"count":found.len(),"repositories":repositories,
+        "remedy":"Handle each nested repository separately, or name a disposable untracked or ignored folder with checkpoint --exclude for that run."
+    })))
 }
 
 fn registrations(data: &[u8]) -> Result<Vec<BTreeMap<String, String>>> {

@@ -1,6 +1,6 @@
 # Product requirements: nested repositories surfaced before capture
 
-Status: proposed 2026-10-27, not implemented. Source: `docs/FIELD-LEARNINGS.md`, 2026-10-27 checkpoint entry.
+Status: implemented 2026-10-27 (nine synthetic regressions in `tests/nested_repositories.rs`); field acceptance pending. Source: `docs/FIELD-LEARNINGS.md`, 2026-10-27 checkpoint entry.
 
 ## Problem
 
@@ -22,3 +22,7 @@ Status: proposed 2026-10-27, not implemented. Source: `docs/FIELD-LEARNINGS.md`,
 ## Acceptance
 
 The three gates pass; on the field case, `inspect` shows the 75 nested repositories as a blocker, and `checkpoint --exclude <artifact folder>` captures the remaining staged, working and untracked paths with the exclusion recorded in the manifest.
+
+## Implementation note (2026-10-27)
+
+Requirement 2 was implemented more strictly than written: `--exclude` refuses every tracked path, clean ones included, not only tracked paths with staged or working changes. Reason: a clean tracked file absent from the working-layer capture would read as a deletion in a consolidation preview and would trigger the staged-versus-working review blocker. Allowing clean tracked exclusions would require preview and planning to substitute the index blob for operator-excluded tracked paths; that is a separate change if ever wanted. No schema change: operator exclusions use the existing `excluded` list with reason `excluded_by_operator`; the only new field is `Verification.excluded_by_operator`, which defaults to empty when absent.

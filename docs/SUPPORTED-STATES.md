@@ -20,7 +20,8 @@ Version 0.1 targets macOS and Linux with a local filesystem. Windows is unsuppor
 | Recovery-folder comparison | Explicit `--compare-folders` reports same-path matches, competing versions, proposed additions and exact saved-copy overlaps without modifying originals. |
 | Unsupported or changing inspection input | Retain partial findings and exact blockers; do not imply that unknown paths were clean or redundant. |
 | Unresolved merge, rebase, cherry-pick, or similar operation | Refuse a worktree checkpoint. |
-| Submodules or nested repositories | Refuse capture; handle them separately. |
+| Submodules or nested repositories | Refuse capture; handle them separately. `inspect` lists every directory below the worktree that holds its own `.git` directory or file under that worktree's blockers, with its relative path, whether it is tracked, untracked or ignored, a count, and the message "checkpoint will refuse this worktree until nested repositories are handled". Inspection does not read a nested repository's contents. |
+| Operator exclusions (`checkpoint --exclude PATH`) | Skip each named path and everything below it for this run only, and record it in the manifest as `excluded_by_operator`; `verify` and `restore` list those paths. An excluded untracked or ignored folder that contains a nested repository no longer triggers the refusal. Refuse, naming the path, an exclusion that matches nothing, overlaps another exclusion or an `--include-ignored` selection, passes through a symbolic link, or covers any tracked path (with staged or working changes, or clean). Exclusions are never remembered, never inferred, and never decide that anything is disposable. |
 | Sparse, shallow, or partial repository; missing objects | Refuse worktree capture; do not fetch data. |
 | Unsupported index flags or stages | Refuse rather than manufacture equivalent index state. |
 | Cloud placeholders | Refuse content capture without triggering hydration. |

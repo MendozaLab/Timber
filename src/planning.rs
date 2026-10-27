@@ -249,7 +249,12 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
                 bytes
                     .split(|b| *b == 0)
                     .filter(|b| !b.is_empty())
-                    .map(|p| Ok(std::str::from_utf8(p)?.to_owned()))
+                    // A collapsed ignored nested repository arrives as `dir/`;
+                    // capture records it without the terminal marker.
+                    .map(|p| {
+                        let p = std::str::from_utf8(p)?;
+                        Ok(p.strip_suffix('/').unwrap_or(p).to_owned())
+                    })
                     .collect::<Result<BTreeSet<_>>>()
             })
         } else {
@@ -261,8 +266,19 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
             .filter(|e| e.kind != EntryKind::Directory)
             .map(|e| e.path.as_str())
             .collect();
-        let expected_omissions: BTreeSet<_> =
-            manifest.excluded.iter().map(|e| e.path.as_str()).collect();
+        // Operator exclusions are declared paths, not ignored-file omissions.
+        let expected_omissions: BTreeSet<_> = manifest
+            .excluded
+            .iter()
+            .filter(|e| e.reason != EXCLUDED_BY_OPERATOR)
+            .map(|e| e.path.as_str())
+            .collect();
+        let operator: BTreeSet<_> = manifest
+            .excluded
+            .iter()
+            .filter(|e| e.reason == EXCLUDED_BY_OPERATOR)
+            .map(|e| e.path.as_str())
+            .collect();
         if let Ok(names) = &ignored {
             let omitted_now: BTreeSet<_> = names
                 .iter()
@@ -274,13 +290,17 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
             }
         }
         let observed = match &ignored {
-            Ok(names) => fsx::inventory_filtered(source, |path| {
-                !manifest
-                    .excluded
-                    .iter()
-                    .any(|x| path == x.path || path.starts_with(&format!("{}/", x.path)))
-                    && (!names.contains(path) || captured.contains(path))
-            }),
+            Ok(names) => fsx::inventory_pruned(
+                source,
+                |path| operator.contains(path),
+                |path| {
+                    !manifest
+                        .excluded
+                        .iter()
+                        .any(|x| path == x.path || path.starts_with(&format!("{}/", x.path)))
+                        && (!names.contains(path) || captured.contains(path))
+                },
+            ),
             Err(error) => Err(anyhow::anyhow!(
                 "cannot resolve current ignored-file coverage: {error:#}"
             )),

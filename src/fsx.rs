@@ -249,6 +249,17 @@ pub fn fingerprint(root: &Path, entry: &Entry) -> Result<(String, u64)> {
     Ok((digest, count))
 }
 pub fn inventory_filtered(root: &Path, include: impl Fn(&str) -> bool) -> Result<Vec<Entry>> {
+    inventory_pruned(root, |_| false, include)
+}
+
+/// Like [`inventory_filtered`], but a pruned path is skipped entirely: no entry is
+/// recorded for it and a pruned directory is never read. Only explicit operator
+/// exclusions prune; a nested repository below an unpruned directory still refuses.
+pub fn inventory_pruned(
+    root: &Path,
+    prune: impl Fn(&str) -> bool,
+    include: impl Fn(&str) -> bool,
+) -> Result<Vec<Entry>> {
     let meta = fs::symlink_metadata(root)?;
     ensure!(
         meta.is_dir() && !meta.file_type().is_symlink(),
@@ -259,6 +270,7 @@ pub fn inventory_filtered(root: &Path, include: impl Fn(&str) -> bool) -> Result
     fn visit(
         root: &Path,
         dir: &Path,
+        prune: &impl Fn(&str) -> bool,
         include: &impl Fn(&str) -> bool,
         out: &mut Vec<Entry>,
     ) -> Result<()> {
@@ -273,6 +285,9 @@ pub fn inventory_filtered(root: &Path, include: impl Fn(&str) -> bool) -> Result
                 .to_owned();
             if item.file_name() == ".git" {
                 ensure!(dir == root, "nested repository refused: {:?}", relative);
+                continue;
+            }
+            if prune(&relative) {
                 continue;
             }
             validate_relative(&relative)?;
@@ -311,15 +326,55 @@ pub fn inventory_filtered(root: &Path, include: impl Fn(&str) -> bool) -> Result
             }
             out.push(entry);
             if kind == EntryKind::Directory {
-                visit(root, &path, include, out)?;
+                visit(root, &path, prune, include, out)?;
             }
         }
         Ok(())
     }
-    visit(root, root, &include, &mut result)?;
+    visit(root, root, &prune, &include, &mut result)?;
     result.sort_by(|a, b| a.path.cmp(&b.path));
     validate_entries(&result)?;
     Ok(result)
+}
+
+/// Directories below `root` that contain a `.git` directory or file, relative to
+/// `root`, in sorted order. The root's own `.git` is not reported. Symbolic links are
+/// never followed, and a nested repository's contents are never read: the walk stops
+/// at the directory that holds the `.git` entry. This uses the same name-based rule
+/// that makes capture refuse a nested repository, so inspection and checkpoint agree.
+pub fn nested_repositories(root: &Path) -> Result<Vec<String>> {
+    let meta = fs::symlink_metadata(root)?;
+    ensure!(
+        meta.is_dir() && !meta.file_type().is_symlink(),
+        "source root must be a real directory"
+    );
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let items = fs::read_dir(&dir)
+            .with_context(|| format!("read directory {}", dir.display()))?
+            .collect::<std::io::Result<Vec<_>>>()?;
+        if dir != root && items.iter().any(|item| item.file_name() == ".git") {
+            found.push(
+                dir.strip_prefix(root)?
+                    .to_str()
+                    .context("non-UTF-8 paths unsupported in version one")?
+                    .to_owned(),
+            );
+            continue;
+        }
+        for item in items {
+            if item.file_name() == ".git" {
+                continue;
+            }
+            // DirEntry::file_type does not follow symbolic links.
+            if item.file_type()?.is_dir() {
+                pending.push(item.path());
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 pub fn ensure_outside(child: &Path, source: &Path) -> Result<()> {
