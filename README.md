@@ -6,9 +6,15 @@ Timber helps developers recover unfinished work scattered across Git worktrees a
 
 Timber is for the moment when several worktrees contain useful changes and you can no longer confidently answer: *what is unique, what has already landed, and what can I safely put aside?*
 
-**Experimental 0.1.0.** Local verification has been performed on macOS. Linux checks are configured in GitHub Actions; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
+[![Check](https://github.com/MendozaLab/Timber/actions/workflows/check.yml/badge.svg)](https://github.com/MendozaLab/Timber/actions/workflows/check.yml)
+
+**Experimental 0.1.0.** Formatting, strict Clippy and the test suite run on macOS and Linux in GitHub Actions on every push; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
 
 The recovery workflow runs locally, without an AI provider, cloud account, or background service. A verified same-device checkpoint is not an independent backup.
+
+## Evidence from real repositories
+
+Timber is run on the maintainers' own working repositories, and what each run teaches is written down in [field learnings](docs/FIELD-LEARNINGS.md) with the fix or proposal that followed. On 2026-10-27, one pass over 13 repositories with 139 registered worktrees scanned 102 of them read-only, wrote nothing into any source, and found uncommitted work in 76; the same day's refusals (a non-private store, nested repositories, an exclusion that covered a tracked file, a source that changed during capture, submodules, a timeout) each named the exact path. Operators driving Timber from an AI coding agent should start with the [agent operator guide](docs/AGENT-OPERATORS.md).
 
 ## What Timber does
 
@@ -141,7 +147,7 @@ cargo test --locked
 
 Bug reports and focused contributions are welcome. Use invented data for reproductions and retain expected refusals as well as successful cases. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sharing reports or changes.
 
-Further documentation: [user guide](docs/USER-GUIDE.md), [field learnings](docs/FIELD-LEARNINGS.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
+Further documentation: [user guide](docs/USER-GUIDE.md), [agent operator guide](docs/AGENT-OPERATORS.md), [field learnings](docs/FIELD-LEARNINGS.md), [changelog](CHANGELOG.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
 
 ## License
 
