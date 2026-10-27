@@ -4,7 +4,7 @@ Timber helps you review and consolidate work without changing the original workt
 
 ## Storage and output
 
-`--store PATH` selects the local checkpoint store. Use a location outside every captured source and preview. A same-disk store does not protect against disk loss. New store directories use owner-only permissions; an existing custom store must be owned by the current user with mode `0700`.
+`--store PATH` selects the local checkpoint store. Use a location outside every captured source and preview. A same-disk store does not protect against disk loss. New store directories use owner-only permissions; an existing custom store must be owned by the current user with mode `0700`. If you create the directory yourself, use `mkdir -m 700`; a plain `mkdir` usually produces mode `0755`, which Timber refuses with the remedy in the message.
 
 The preservation and preview examples below consistently use `--store ./timber-store`. Choose your own location and use it throughout the workflow.
 
@@ -32,7 +32,7 @@ timber --json inspect --repo ./project --folder ./saved-work \
   --compare-folders --out inspection.json
 ```
 
-Progress goes to standard error; structured output stays on standard output. Scope, elapsed time, partial results and skipped worktrees are recorded. Indexed Git content is read through a streaming batch instead of launching a Git process for each tracked file. Ignored files remain metadata-only; `--compare-folders` explicitly enables reads of supplied recovery-folder payloads and their proposed current target paths.
+Untracked counts are per file: `git status --short` collapses an untracked directory into one line, so Timber's untracked number is usually larger. Both are correct; state which one a report quotes. Progress goes to standard error; structured output stays on standard output. Scope, elapsed time, partial results and skipped worktrees are recorded. Indexed Git content is read through a streaming batch instead of launching a Git process for each tracked file. Ignored files remain metadata-only; `--compare-folders` explicitly enables reads of supplied recovery-folder payloads and their proposed current target paths.
 
 Same-path comparisons require equal content hashes, byte lengths, file types and executable flags. Different versions need review. Absent means absent at the proposed target path, not absent everywhere. Saved-copy duplicate groups require the same proposed target and exact fingerprints. They can overlap the target-match count, so do not add them as independent cleanup candidates.
 

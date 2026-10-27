@@ -97,7 +97,7 @@ timber --store ./timber-store report assessment.json --to report.html
 
 Use the same checkpoint store when rendering a source-bound report.
 
-Open `report.html` in a browser. It uses no scripts, remote assets, or local server. Paths, filenames, and errors remain data rather than executable markup. Review reports before sharing: they can reveal private project names and filenames.
+Open `report.html` in a browser. Some embedded or sandboxed viewers refuse `file://` URLs; serve the report directory on a loopback port (for example `python3 -m http.server --bind 127.0.0.1 0` from that directory) and open it from there. It uses no scripts, remote assets, or local server. Paths, filenames, and errors remain data rather than executable markup. Review reports before sharing: they can reveal private project names and filenames.
 
 ## Recovery before cleanup
 
@@ -141,7 +141,7 @@ cargo test --locked
 
 Bug reports and focused contributions are welcome. Use invented data for reproductions and retain expected refusals as well as successful cases. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sharing reports or changes.
 
-Further documentation: [user guide](docs/USER-GUIDE.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
+Further documentation: [user guide](docs/USER-GUIDE.md), [field learnings](docs/FIELD-LEARNINGS.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
 
 ## License
 
