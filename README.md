@@ -97,7 +97,7 @@ timber --store ./timber-store report assessment.json --to report.html
 
 Use the same checkpoint store when rendering a source-bound report.
 
-Open `report.html` in a browser. Some embedded or sandboxed viewers refuse `file://` URLs; serve the report directory on a loopback port (for example `python3 -m http.server --bind 127.0.0.1 0` from that directory) and open it from there. It uses no scripts, remote assets, or local server. Paths, filenames, and errors remain data rather than executable markup. Review reports before sharing: they can reveal private project names and filenames.
+A `partial` inspection (a timeout, a failed worktree, a missing registration) still renders; run `report` regardless of the inspect exit code and read the status field. Open `report.html` in a browser. Some embedded or sandboxed viewers refuse `file://` URLs; serve the report directory on a loopback port (for example `python3 -m http.server --bind 127.0.0.1 0` from that directory) and open it from there. It uses no scripts, remote assets, or local server. Paths, filenames, and errors remain data rather than executable markup. Review reports before sharing: they can reveal private project names and filenames.
 
 ## Recovery before cleanup
 
