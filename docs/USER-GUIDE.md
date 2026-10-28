@@ -4,7 +4,7 @@ Timber helps you review and consolidate work without changing the original workt
 
 ## Storage and output
 
-`--store PATH` selects the local checkpoint store. Use a location outside every captured source and preview. A same-disk store does not protect against disk loss. New store directories use owner-only permissions; an existing custom store must be owned by the current user with mode `0700`. If you create the directory yourself, use `mkdir -m 700`; a plain `mkdir` usually produces mode `0755`, which Timber refuses with the remedy in the message.
+`--store PATH` selects the local checkpoint store. Without it, `checkpoint` uses the `store` named in the repository's `timber.toml` (see [team convention file](#team-convention-file)), then the `TIMBER_STORE` environment variable, then the operating system's local data directory. Use a location outside every captured source and preview. A same-disk store does not protect against disk loss. New store directories use owner-only permissions; an existing custom store must be owned by the current user with mode `0700`. If you create the directory yourself, use `mkdir -m 700`; a plain `mkdir` usually produces mode `0755`, which Timber refuses with the remedy in the message.
 
 The preservation and preview examples below consistently use `--store ./timber-store`. Choose your own location and use it throughout the workflow.
 
@@ -12,7 +12,33 @@ The preservation and preview examples below consistently use `--store ./timber-s
 
 Restoration and preview destinations must be new directories. Timber refuses existing destinations and paths nested inside captured sources.
 
-`--git-timeout SECONDS` sets the limit for each single Git operation (default 120, from 1 to 86400) for one run. Raise it for a known-large repository, for example `timber --git-timeout 600 inspect --repo ./project`. A timeout never changes the source: inspection reports the worktree as partial and checkpoint refuses, and the message names the Git operation and the limit that applied.
+`--git-timeout SECONDS` sets the limit for each single Git operation (default 120, from 1 to 86400) for one run. Raise it for a known-large repository, for example `timber --git-timeout 600 inspect --repo ./project`. A timeout never changes the source: inspection reports the worktree as partial and checkpoint refuses, and the message names the Git operation and the limit that applied. Without the flag, `inspect` and `checkpoint` use the repository's `timber.toml` `git_timeout_seconds` when it sets one.
+
+## Team convention file
+
+A team that shares a repository can commit one file, `timber.toml`, at the repository root, so every person and agent uses the same store, the same standing exclusions and the same Git time limit without retyping them.
+
+```sh
+timber init ./project      # writes a commented template; refuses if timber.toml exists
+```
+
+`timber init` writes a template in which every key is commented out, so it changes nothing until you edit it. It writes only at the worktree root and never overwrites an existing file. The file holds at most four keys:
+
+```toml
+store = "$HOME/timber-store"          # absolute, or starting with $NAME or ${NAME}
+exclude = ["test-output", "build/tmp"] # relative to the repository root
+git_timeout_seconds = 300             # 1 to 86400
+schedule = "before each merge to main" # a note for people; never acted on
+```
+
+- **`store`:** used by `checkpoint` when `--store` is absent. It must resolve to an absolute path; a leading environment-variable reference is expanded from your environment and refused, by name, when the variable is not set. The store must still lie outside every source; Timber refuses it otherwise, wherever it came from.
+- **`exclude`:** applied to every `checkpoint` of the repository as if passed with `--exclude`, under exactly the same refusals (tracked paths, paths that match nothing, symbolic links, overlaps). Each one is recorded in the manifest as `excluded_by_convention_file`, so a reviewer can tell team convention from a per-run `excluded_by_operator` choice; `verify` and `restore` list both.
+- **`git_timeout_seconds`:** used by `inspect` and `checkpoint` when `--git-timeout` is absent.
+- **`schedule`:** free text for people. Timber never schedules, starts or repeats anything.
+
+Explicit beats implicit. `--store` and `--git-timeout` override the file for one run. `--exclude` adds to the file's list; when it names the same path as a file entry, or a parent of one, that entry yields and the path is recorded as the operator's. An `--include-ignored` selection that overlaps a file entry also overrides that entry for the run. An `--exclude` strictly inside a file entry is refused, because the convention already skips it; narrow the convention by editing the file. Every override is listed under `convention.exclusions_overridden`.
+
+Nothing is silent. `inspect` and `checkpoint` print to standard error which convention file they read, or that none was found, before any other work, and carry the same information in their result under `convention` (file, status, values, and where the store and time limit came from). A file with an unknown key, a table, a repeated key or a value of the wrong type is refused, naming the key or line, and the command stops. A symbolic link at `timber.toml` is refused. Commands that take no repository (`verify`, `restore`, `checkpoints`, `plan`, `preview`, `assess`, `report`, `import`) do not read the file: pass `--store` or set `TIMBER_STORE` for them.
 
 ## 1. Inspect the relevant project
 
@@ -69,7 +95,7 @@ A nested repository below the worktree (a folder with its own `.git` directory o
 timber --store ./timber-store checkpoint ./agent-navigation --exclude test-output --exclude build/tmp
 ```
 
-`--exclude` is repeatable and takes paths relative to the worktree. Timber skips each path and everything below it, and records it in the manifest as `excluded_by_operator`; `verify` and `restore` print the excluded paths, so a partial capture cannot pass for a complete one. Only untracked or ignored paths can be excluded: Timber refuses, naming the path, an exclusion that covers a tracked path (whether or not it has staged or working changes), matches nothing, passes through a symbolic link, or overlaps another exclusion or an `--include-ignored` selection. The decision is yours and lasts for one run; Timber never remembers an exclusion or guesses that something is disposable. Inspection takes no `--exclude` and keeps reporting the nested repository.
+`--exclude` is repeatable and takes paths relative to the worktree. Timber skips each path and everything below it, and records it in the manifest as `excluded_by_operator`; `verify` and `restore` print the excluded paths, so a partial capture cannot pass for a complete one. Only untracked or ignored paths can be excluded: Timber refuses, naming the path, an exclusion that covers a tracked path (whether or not it has staged or working changes), matches nothing, passes through a symbolic link, or overlaps another exclusion or an `--include-ignored` selection. The decision is yours and lasts for one run; Timber never remembers an exclusion or guesses that something is disposable. A standing exclusion exists only when your team writes it into a committed `timber.toml`, and it is then recorded as `excluded_by_convention_file`. Inspection takes no `--exclude` and keeps reporting the nested repository.
 
 A linked worktree of the same repository that an agent tool keeps inside your checkout (created with `git worktree add`, so its `.git` file points at this repository's `.git/worktrees/<name>` and Git's registration points back at it) is not a foreign nested repository: `inspect` lists it under `linked_worktrees_inside` instead of the blocker, and `checkpoint` skips it without `--exclude` and records it as `linked_worktree_captured_separately`, which `verify` and `restore` print. Checkpoint each linked worktree on its own. A `.git` file Timber cannot prove is such a registration (unreadable, malformed, pointing elsewhere, or reached through a symbolic link) still refuses.
 

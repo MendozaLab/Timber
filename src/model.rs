@@ -11,14 +11,22 @@ pub const INSPECT_SCHEMA: u32 = 2;
 /// `Exclusion::reason` for a path the operator named with `checkpoint --exclude`.
 /// Declared per run; never remembered or inferred.
 pub const EXCLUDED_BY_OPERATOR: &str = "excluded_by_operator";
+/// `Exclusion::reason` for a path listed in the repository's `timber.toml`
+/// `exclude` key and applied as if passed with `checkpoint --exclude`. Kept distinct
+/// from [`EXCLUDED_BY_OPERATOR`] so a reviewer can tell team convention from a
+/// per-run operator choice.
+pub const EXCLUDED_BY_CONVENTION_FILE: &str = "excluded_by_convention_file";
 /// `Exclusion::reason` for a folder below the worktree that Git registered as a linked
 /// worktree of this same repository. Checkpoint skips it automatically; it is
 /// captured by checkpointing that worktree on its own.
 pub const LINKED_WORKTREE_CAPTURED_SEPARATELY: &str = "linked_worktree_captured_separately";
 /// True for exclusion reasons that name a declared folder skipped as a whole (operator
-/// exclusions and linked worktrees), as opposed to ignored-file omissions.
+/// exclusions, convention-file exclusions and linked worktrees), as opposed to
+/// ignored-file omissions.
 pub fn is_skipped_folder(reason: &str) -> bool {
-    reason == EXCLUDED_BY_OPERATOR || reason == LINKED_WORKTREE_CAPTURED_SEPARATELY
+    reason == EXCLUDED_BY_OPERATOR
+        || reason == EXCLUDED_BY_CONVENTION_FILE
+        || reason == LINKED_WORKTREE_CAPTURED_SEPARATELY
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -205,6 +213,11 @@ pub struct Verification {
     /// Defaults to empty so verification records written before this field still load.
     #[serde(default)]
     pub excluded_by_operator: Vec<String>,
+    /// Paths excluded at capture because the repository's `timber.toml` listed them.
+    /// Absent from the checkpoint and any restore. Omitted when empty, so records
+    /// without convention exclusions keep their earlier shape.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded_by_convention_file: Vec<String>,
     /// Linked worktrees of this repository found below the captured worktree and skipped
     /// automatically; each is captured by checkpointing it on its own. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

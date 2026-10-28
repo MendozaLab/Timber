@@ -317,26 +317,47 @@ fn working_differs(
         .unwrap_or(true)
 }
 
-/// Validates every `--exclude` before the store is touched. An exclusion must name an
-/// existing path, reached without following a symbolic link, that holds no tracked
-/// path. Tracked paths are refused even when clean: their history and index are
-/// captured anyway, and a missing working copy would read as a deletion in previews.
-fn operator_exclusions(
+/// How an exclusion was declared: its manifest reason and the name used in messages.
+fn exclusion_label(reason: &str) -> &'static str {
+    if reason == EXCLUDED_BY_CONVENTION_FILE {
+        "timber.toml exclude"
+    } else {
+        "--exclude"
+    }
+}
+
+/// Validates every declared exclusion (command-line `--exclude` and the repository's
+/// `timber.toml` `exclude` list) before the store is touched. Both are held to the
+/// same rules: an exclusion must name an existing path, reached without following a
+/// symbolic link, that holds no tracked path. Tracked paths are refused even when
+/// clean: their history and index are captured anyway, and a missing working copy
+/// would read as a deletion in previews. Each refusal names the path and its origin.
+fn declared_exclusions(
     source: &Path,
-    exclude: &[String],
+    requests: &[(String, &'static str)],
     include_ignored: &[String],
-) -> Result<Vec<String>> {
-    let mut selectors: Vec<String> = Vec::new();
-    for raw in exclude {
+) -> Result<Vec<(String, &'static str)>> {
+    let mut selectors: Vec<(String, &'static str)> = Vec::new();
+    for (raw, reason) in requests {
+        let label = exclusion_label(reason);
         let selector = raw.trim_end_matches('/').to_owned();
         fsx::validate_relative(&selector)
-            .with_context(|| format!("invalid --exclude path: {raw:?}"))?;
-        for earlier in &selectors {
-            ensure!(
-                !included(&selector, std::slice::from_ref(earlier))
-                    && !included(earlier, std::slice::from_ref(&selector)),
-                "--exclude paths repeat or overlap: {earlier} and {selector}"
-            );
+            .with_context(|| format!("invalid {label} path: {raw:?}"))?;
+        for (earlier, earlier_reason) in &selectors {
+            let overlap = included(&selector, std::slice::from_ref(earlier))
+                || included(earlier, std::slice::from_ref(&selector));
+            if earlier_reason == reason {
+                ensure!(
+                    !overlap,
+                    "{label} paths repeat or overlap: {earlier} and {selector}"
+                );
+            } else {
+                ensure!(
+                    !overlap,
+                    "exclusions repeat or overlap: {earlier} ({}) and {selector} ({label})",
+                    exclusion_label(earlier_reason)
+                );
+            }
         }
         for chosen in include_ignored {
             let chosen = chosen.trim_end_matches('/').to_owned();
@@ -346,14 +367,15 @@ fn operator_exclusions(
                 "path is both excluded and selected with --include-ignored: {selector} and {chosen}"
             );
         }
-        selectors.push(selector);
+        selectors.push((selector, *reason));
     }
     if selectors.is_empty() {
         return Ok(selectors);
     }
     let index = crate::inspect::index(source)?;
     let head = crate::inspect::head_tree(source)?;
-    for selector in &selectors {
+    for (selector, reason) in &selectors {
+        let label = exclusion_label(reason);
         let scope = std::slice::from_ref(selector);
         let tracked = index
             .keys()
@@ -375,10 +397,10 @@ fn operator_exclusions(
             });
             match changed {
                 Some(path) => bail!(
-                    "--exclude refused for tracked path with staged or working changes: {path} (named by --exclude {selector})"
+                    "{label} refused for tracked path with staged or working changes: {path} (named by {label} {selector})"
                 ),
                 None => bail!(
-                    "--exclude refused for tracked path: {first} (named by --exclude {selector}); exclusion applies only to untracked or ignored paths"
+                    "{label} refused for tracked path: {first} (named by {label} {selector}); exclusion applies only to untracked or ignored paths"
                 ),
             }
         }
@@ -390,13 +412,12 @@ fn operator_exclusions(
                 Ok(m) => position + 1 == parts.len() || (m.is_dir() && !m.file_type().is_symlink()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
                 Err(e) => {
-                    return Err(e)
-                        .with_context(|| format!("--exclude path unavailable: {selector}"));
+                    return Err(e).with_context(|| format!("{label} path unavailable: {selector}"));
                 }
             };
             ensure!(
                 exists,
-                "--exclude matches no path in the worktree: {selector}"
+                "{label} matches no path in the worktree: {selector}"
             );
         }
     }
@@ -404,18 +425,18 @@ fn operator_exclusions(
 }
 
 /// Linked worktrees of this repository below `source`, by relative path, that
-/// checkpoint skips automatically. The walk does not enter operator exclusions or
-/// gitlink paths. A linked worktree whose folder holds a tracked path of this
-/// worktree is refused, naming it, because a missing tracked working copy would read
-/// as a deletion; an operator exclusion strictly inside a linked worktree is refused
-/// because that folder is skipped as a whole. Foreign nested repositories are not
+/// checkpoint skips automatically. The walk does not enter declared exclusions
+/// (operator or convention file) or gitlink paths. A linked worktree whose folder
+/// holds a tracked path of this worktree is refused, naming it, because a missing
+/// tracked working copy would read as a deletion; a declared exclusion strictly
+/// inside a linked worktree is refused because that folder is skipped as a whole. Foreign nested repositories are not
 /// returned; the capture walk refuses them.
 fn linked_worktrees_inside(
     source: &Path,
-    operator: &[String],
+    declared: &[(String, &'static str)],
     gitlinks: &BTreeSet<String>,
 ) -> Result<BTreeMap<String, String>> {
-    let skipped = |p: &str| gitlinks.contains(p) || operator.iter().any(|x| x == p);
+    let skipped = |p: &str| gitlinks.contains(p) || declared.iter().any(|(x, _)| x == p);
     let candidates = fsx::nested_repositories(source)?;
     if candidates.iter().all(|p| skipped(p)) {
         return Ok(BTreeMap::new());
@@ -438,12 +459,13 @@ fn linked_worktrees_inside(
                 "linked worktree {path} (registration {name}) holds tracked path {tracked}; checkpoint cannot skip it"
             );
         }
-        if let Some(inner) = operator
+        if let Some((inner, reason)) = declared
             .iter()
-            .find(|x| x.as_str() != path && included(x, scope))
+            .find(|(x, _)| x.as_str() != path && included(x, scope))
         {
             bail!(
-                "--exclude {inner} lies inside linked worktree {path} (registration {name}), which checkpoint skips as a whole; name the folder or nothing"
+                "{} {inner} lies inside linked worktree {path} (registration {name}), which checkpoint skips as a whole; name the folder or nothing",
+                exclusion_label(reason)
             );
         }
     }
@@ -489,10 +511,36 @@ pub fn checkpoint_with_exclusions(
     exclude: &[String],
     writers_paused: bool,
 ) -> Result<Manifest> {
+    checkpoint_with_convention(store, path, include_ignored, exclude, &[], writers_paused)
+}
+
+/// Capture with operator exclusions and exclusions from the repository's convention
+/// file. Convention exclusions are applied exactly as if passed with `--exclude`,
+/// under the same refusals, and recorded as `excluded_by_convention_file`. Callers
+/// resolve command-line overrides first (see `convention::merge_exclusions`); any
+/// remaining overlap between the two lists is refused, naming both origins. Linked
+/// worktrees are skipped and recorded as in [`checkpoint_with_exclusions`].
+pub fn checkpoint_with_convention(
+    store: &Store,
+    path: &Path,
+    include_ignored: &[String],
+    exclude: &[String],
+    convention_exclude: &[String],
+    writers_paused: bool,
+) -> Result<Manifest> {
     let source = path.canonicalize()?;
     fsx::ensure_outside(&store.root, &source)?;
     validate_worktree(&source)?;
-    let operator = operator_exclusions(&source, exclude, include_ignored)?;
+    let requests = exclude
+        .iter()
+        .map(|p| (p.clone(), EXCLUDED_BY_OPERATOR))
+        .chain(
+            convention_exclude
+                .iter()
+                .map(|p| (p.clone(), EXCLUDED_BY_CONVENTION_FILE)),
+        )
+        .collect::<Vec<_>>();
+    let declared = declared_exclusions(&source, &requests, include_ignored)?;
     // Linked worktrees of this repository are skipped as whole folders and recorded;
     // foreign nested repositories still refuse during the capture walk.
     let gitlinks_now = read_index(&source)?
@@ -500,11 +548,11 @@ pub fn checkpoint_with_exclusions(
         .filter(|(_, mode, _)| mode == GITLINK_MODE)
         .map(|(path, _, _)| path)
         .collect::<BTreeSet<_>>();
-    let linked = linked_worktrees_inside(&source, &operator, &gitlinks_now)?;
+    let linked = linked_worktrees_inside(&source, &declared, &gitlinks_now)?;
     let pruned = std::cell::RefCell::new(BTreeSet::new());
     let prune = |p: &str| {
-        let hit = operator.iter().find(|x| x.as_str() == p);
-        if let Some(x) = hit {
+        let hit = declared.iter().find(|(x, _)| x.as_str() == p);
+        if let Some((x, _)) = hit {
             pruned.borrow_mut().insert(x.clone());
         }
         hit.is_some()
@@ -556,10 +604,11 @@ pub fn checkpoint_with_exclusions(
     }
     let exclude = |p: &str| ignored.contains(p) && !included(p, &selectors);
     let entries = scan(&|p| !exclude(p))?;
-    for selector in &operator {
+    for (selector, reason) in &declared {
         ensure!(
             pruned.borrow().contains(selector),
-            "--exclude matched nothing during capture: {selector}"
+            "{} matched nothing during capture: {selector}",
+            exclusion_label(reason)
         );
     }
     let head = git::text(&source, &["rev-parse", "--verify", "HEAD"])?;
@@ -624,7 +673,7 @@ pub fn checkpoint_with_exclusions(
     );
     validate_worktree(&source)?;
     ensure!(
-        linked == linked_worktrees_inside(&source, &operator, &gitlinks)?,
+        linked == linked_worktrees_inside(&source, &declared, &gitlinks)?,
         "linked worktrees inside the worktree changed during capture"
     );
     ensure!(
@@ -644,14 +693,20 @@ pub fn checkpoint_with_exclusions(
         .collect::<Result<Vec<_>>>()?;
     protected_roots.sort();
     protected_roots.dedup();
-    // Operator exclusions come first, then linked worktrees skipped automatically.
-    // Ignored omissions keep their own records, even below a skipped folder, so later
-    // assessment compares like with like.
-    let excluded = operator
+    // Operator exclusions come first, then convention-file exclusions, then linked
+    // worktrees skipped automatically. Ignored omissions keep their own records, even
+    // below a skipped folder, so later assessment compares like with like.
+    let excluded = declared
         .iter()
-        .map(|path| Exclusion {
+        .filter(|(_, reason)| *reason == EXCLUDED_BY_OPERATOR)
+        .chain(
+            declared
+                .iter()
+                .filter(|(_, reason)| *reason == EXCLUDED_BY_CONVENTION_FILE),
+        )
+        .map(|(path, reason)| Exclusion {
             path: path.clone(),
-            reason: EXCLUDED_BY_OPERATOR.into(),
+            reason: (*reason).into(),
         })
         .chain(linked.keys().map(|path| Exclusion {
             path: path.clone(),

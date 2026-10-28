@@ -9,7 +9,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use timber_worktrees::{
-    capture, fsx, inspect,
+    capture,
+    convention::{self, Convention, Overridden},
+    fsx, inspect,
     model::{ImportMap, Layer, Plan, Selection},
     planning, preview, report, restore,
     store::Store,
@@ -22,7 +24,8 @@ use timber_worktrees::{
     about = "Untangle dirty worktrees. Keep the useful work."
 )]
 struct Cli {
-    /// Checkpoint store outside source repositories (defaults to OS local data directory).
+    /// Checkpoint store outside source repositories. Wins over the repository's
+    /// timber.toml `store`, then TIMBER_STORE, then the OS local data directory.
     #[arg(long, global = true)]
     store: Option<PathBuf>,
     /// Emit machine-readable results.
@@ -31,21 +34,26 @@ struct Cli {
     /// Save the complete result (or editable consolidation plan) to a new JSON file.
     #[arg(long, global = true)]
     out: Option<PathBuf>,
-    /// Limit in seconds for each single Git operation (1 to 86400). A timeout leaves
-    /// the source untouched and the result partial, naming the operation.
+    /// Limit in seconds for each single Git operation (1 to 86400; default 120). Wins
+    /// over the repository's timber.toml `git_timeout_seconds`. A timeout leaves the
+    /// source untouched and the result partial, naming the operation.
     #[arg(
         long,
         global = true,
         value_name = "SECONDS",
-        default_value_t = timber_worktrees::git::DEFAULT_TIMEOUT_SECONDS,
         value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
-    git_timeout: u64,
+    git_timeout: Option<u64>,
     #[command(subcommand)]
     command: Commands,
 }
 #[derive(Subcommand)]
 enum Commands {
+    /// Write a commented timber.toml template at the worktree root. Never overwrites.
+    Init {
+        #[arg(default_value = ".")]
+        worktree: PathBuf,
+    },
     /// Inspect explicitly supplied repository and preservation roots. No source writes.
     Inspect {
         #[arg(long)]
@@ -72,6 +80,7 @@ enum Commands {
         include_ignored: Vec<String>,
         /// Skip a disposable untracked or ignored path for this run only (repeatable,
         /// relative to the worktree). Recorded as excluded_by_operator; never remembered.
+        /// Adds to the timber.toml `exclude` list and overrides any entry it covers.
         #[arg(long)]
         exclude: Vec<String>,
         #[arg(long)]
@@ -137,22 +146,91 @@ enum CheckpointCommands {
     Show { id: String },
 }
 
-fn default_store() -> Result<PathBuf> {
+fn default_store() -> Result<(PathBuf, &'static str)> {
     if let Some(value) = std::env::var_os("TIMBER_STORE") {
-        return Ok(value.into());
+        return Ok((value.into(), "environment"));
     }
     let home = std::env::var_os("HOME").context("HOME is not configured; pass --store")?;
     #[cfg(target_os = "macos")]
     {
-        Ok(PathBuf::from(home).join("Library/Application Support/Timber"))
+        Ok((
+            PathBuf::from(home).join("Library/Application Support/Timber"),
+            "default",
+        ))
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Ok(std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(home).join(".local/state"))
-            .join("timber"))
+        Ok((
+            std::env::var_os("XDG_STATE_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(home).join(".local/state"))
+                .join("timber"),
+            "default",
+        ))
     }
+}
+/// Store precedence: `--store`, then the convention file's `store`, then
+/// TIMBER_STORE, then the OS local data directory. Returns where it came from.
+fn store_for(cli: &Cli, found: Option<&Convention>) -> Result<(PathBuf, &'static str)> {
+    if let Some(store) = &cli.store {
+        return Ok((store.clone(), "command_line"));
+    }
+    if let Some(raw) = found.and_then(|c| c.values.store.as_deref()) {
+        return Ok((convention::resolve_store(raw)?, "convention_file"));
+    }
+    default_store()
+}
+/// Git timeout precedence: `--git-timeout`, then the convention file, then 120.
+fn timeout_for(cli: &Cli, found: &Convention) -> (u64, &'static str) {
+    match (cli.git_timeout, found.values.git_timeout_seconds) {
+        (Some(seconds), _) => (seconds, "command_line"),
+        (None, Some(seconds)) => (seconds, "convention_file"),
+        (None, None) => (timber_worktrees::git::DEFAULT_TIMEOUT_SECONDS, "default"),
+    }
+}
+/// Reads the repository's convention file and says so on standard error before any
+/// further work, so even a later refusal shows whether the file applied.
+fn read_convention(path: &Path) -> Result<Convention> {
+    let found = convention::load(&convention::root(path)?)?;
+    if found.found {
+        eprintln!("Timber: read convention file {}", found.file.display());
+    } else {
+        eprintln!(
+            "Timber: no convention file found at {}",
+            found.file.display()
+        );
+    }
+    Ok(found)
+}
+fn convention_report(
+    found: &Convention,
+    timeout: (u64, &str),
+    store: Option<&(PathBuf, &str)>,
+    exclusions: Option<(&[String], &[Overridden])>,
+) -> Value {
+    let mut report = json!({
+        "file": found.file,
+        "status": if found.found { "read" } else { "not_found" },
+        "git_timeout_seconds": {"value": timeout.0, "from": timeout.1},
+    });
+    let mut notes = Vec::new();
+    if found.found {
+        report["values"] = json!(found.values);
+        if found.values.schedule.is_some() {
+            notes.push("schedule is a note for people; Timber never schedules anything.");
+        }
+    } else {
+        notes.push("No timber.toml at the repository root; command-line flags and defaults apply.");
+    }
+    if let Some((path, from)) = store {
+        report["store"] = json!({"path": path, "from": from});
+    }
+    if let Some((applied, overridden)) = exclusions {
+        report["exclusions_applied"] = json!(applied);
+        report["exclusions_overridden"] = json!(overridden);
+    }
+    report["notes"] = json!(notes);
+    report
 }
 fn layer(value: &str) -> Layer {
     match value {
@@ -218,10 +296,35 @@ fn protect_output(output: Option<&Path>, roots: &[PathBuf]) -> Result<()> {
 }
 
 fn execute(cli: &Cli) -> Result<(Value, i32)> {
-    timber_worktrees::git::set_timeout_seconds(cli.git_timeout);
-    let store_path = cli.store.clone().map(Ok).unwrap_or_else(default_store)?;
+    timber_worktrees::git::set_timeout_seconds(
+        cli.git_timeout
+            .unwrap_or(timber_worktrees::git::DEFAULT_TIMEOUT_SECONDS),
+    );
+    // Commands without a repository argument do not read a convention file.
+    let flag_store = || store_for(cli, None).map(|(path, _)| path);
     let mut code = 0;
     let (command, result) = match &cli.command {
+        Commands::Init { worktree } => {
+            let root = convention::root(worktree)?;
+            ensure!(
+                root.canonicalize()? == worktree.canonicalize()?,
+                "init must select the worktree root: {}",
+                root.display()
+            );
+            protect_output(
+                cli.out.as_deref(),
+                &timber_worktrees::git::protected_roots(&root)?,
+            )?;
+            let file = convention::init(&root)?;
+            (
+                "init",
+                json!({"status":"written","file":file,"notes":[
+                    "Commented template: every key is commented out, so nothing changes until you edit it.",
+                    "Review and commit timber.toml so every person and agent on this repository reads the same convention.",
+                    "Timber never schedules anything; schedule is a note for people."
+                ]}),
+            )
+        }
         Commands::Inspect {
             repo,
             folder,
@@ -236,7 +339,11 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
                 compare_folders: *compare_folders,
                 list_ignored: *list_ignored,
             };
-            let result = inspect::inspect_with_options(repo, folder, &options)?;
+            let found = read_convention(repo)?;
+            let timeout = timeout_for(cli, &found);
+            timber_worktrees::git::set_timeout_seconds(timeout.0);
+            let mut result = inspect::inspect_with_options(repo, folder, &options)?;
+            result["convention"] = convention_report(&found, timeout, None, None);
             if result["status"] == "partial" {
                 code = 1;
             }
@@ -258,21 +365,34 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             exclude,
             writers_paused,
         } => {
+            let found = read_convention(worktree)?;
+            let timeout = timeout_for(cli, &found);
+            timber_worktrees::git::set_timeout_seconds(timeout.0);
+            let chosen_store = store_for(cli, Some(&found))?;
+            let (applied, overridden) =
+                convention::merge_exclusions(&found.values.exclude, exclude, include_ignored)?;
             let roots = timber_worktrees::git::protected_roots(worktree)?;
-            protect_output(Some(&store_path), &roots)?;
+            protect_output(Some(&chosen_store.0), &roots)?;
             protect_output(cli.out.as_deref(), &roots)?;
-            let store = Store::open(&store_path)?;
-            let manifest = capture::checkpoint_with_exclusions(
+            let store = Store::open(&chosen_store.0)?;
+            let manifest = capture::checkpoint_with_convention(
                 &store,
                 worktree,
                 include_ignored,
                 exclude,
+                &applied,
                 *writers_paused,
             )?;
             let verification = restore::verify(&store, &manifest.id)?;
+            let report = convention_report(
+                &found,
+                timeout,
+                Some(&chosen_store),
+                Some((&applied, &overridden)),
+            );
             (
                 "checkpoint",
-                json!({"checkpoint":manifest,"verification":verification}),
+                json!({"checkpoint":manifest,"verification":verification,"convention":report}),
             )
         }
         Commands::Import {
@@ -281,6 +401,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             writers_paused,
             dependency_repo,
         } => {
+            let store_path = flag_store()?;
             fsx::ensure_outside(&store_path, folder)?;
             protect_output(cli.out.as_deref(), std::slice::from_ref(folder))?;
             if let Some(repo) = dependency_repo {
@@ -304,7 +425,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             )
         }
         Commands::Checkpoints { command } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             match command {
                 CheckpointCommands::List => {
                     let manifests = store.list()?;
@@ -323,19 +444,19 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             }
         }
         Commands::Verify { id } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             let m = store.load(id)?;
             protect_output(cli.out.as_deref(), &manifest_roots(&m))?;
             ("verify", value(restore::verify(&store, id)?)?)
         }
         Commands::Restore { id, to } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             let m = store.load(id)?;
             protect_output(cli.out.as_deref(), &manifest_roots(&m))?;
             ("restore", value(restore::restore(&store, id, to)?)?)
         }
         Commands::RestoreGit { id, group, to } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             let manifest = store.load(id)?;
             let roots = manifest_roots(&manifest);
             protect_output(Some(to), &roots)?;
@@ -350,7 +471,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             source,
             layer: l,
         } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             let target = Selection {
                 checkpoint: target.clone(),
                 layer: layer(l),
@@ -369,7 +490,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             ("plan", value(plan)?)
         }
         Commands::Preview { plan, to } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             let plan = load_plan(plan)?;
             let roots = source_roots(&store, &plan)?;
             protect_output(Some(to), &roots)?;
@@ -381,7 +502,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             ("preview", value(result)?)
         }
         Commands::Assess { plan } => {
-            let store = Store::existing(&store_path)?;
+            let store = Store::existing(&flag_store()?)?;
             let plan = load_plan(plan)?;
             protect_output(cli.out.as_deref(), &source_roots(&store, &plan)?)?;
             let result = planning::assess(&store, &plan)?;
@@ -445,7 +566,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             let mut ids = std::collections::BTreeSet::new();
             checkpoint_ids(&result, &mut ids);
             if !ids.is_empty() {
-                let store = Store::existing(&store_path).context(
+                let store = Store::existing(&flag_store()?).context(
                     "source-bound reports require the checkpoint store for output confinement",
                 )?;
                 let roots = ids

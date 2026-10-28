@@ -3,8 +3,8 @@ use crate::{
     capture::{GITLINK_MODE, read_index},
     fsx, git,
     model::{
-        EXCLUDED_BY_OPERATOR, EntryKind, LINKED_WORKTREE_CAPTURED_SEPARATELY, Manifest, SCHEMA,
-        Verification,
+        EXCLUDED_BY_CONVENTION_FILE, EXCLUDED_BY_OPERATOR, EntryKind,
+        LINKED_WORKTREE_CAPTURED_SEPARATELY, Manifest, SCHEMA, Verification,
     },
     store::Store,
 };
@@ -263,6 +263,18 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
             excluded_by_operator.len()
         ));
     }
+    let excluded_by_convention_file = manifest
+        .excluded
+        .iter()
+        .filter(|x| x.reason == EXCLUDED_BY_CONVENTION_FILE)
+        .map(|x| x.path.clone())
+        .collect::<Vec<_>>();
+    if !excluded_by_convention_file.is_empty() {
+        notes.push(format!(
+            "Partial capture: the repository's timber.toml excluded {} paths at checkpoint time; they and everything below them are absent from this checkpoint and from any restore. See excluded_by_convention_file.",
+            excluded_by_convention_file.len()
+        ));
+    }
     let linked_worktrees_captured_separately = manifest
         .excluded
         .iter()
@@ -301,6 +313,7 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
         .into(),
         independent_backup: "unassessed".into(),
         excluded_by_operator,
+        excluded_by_convention_file,
         linked_worktrees_captured_separately,
         submodules_recorded_not_captured: submodules,
         notes,

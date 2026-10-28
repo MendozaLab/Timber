@@ -33,6 +33,7 @@ Unknown stays unknown. Timber supplies the evidence for the first three columns 
 4. Do not write anything into a worktree while it is being captured. That includes your own progress cards, logs and receipts. A capture whose source changed is refused with the changed path named; keep run records outside the repository or write them after the capture returns.
 5. Handle nested repositories before capture. `inspect` lists them as a blocker. Disposable ones (test fixtures, scratch clones) can be skipped for one run with `checkpoint --exclude <path>`; the exclusion is recorded in the manifest and printed by `verify` and `restore`. Tracked paths cannot be excluded. Linked worktrees that an agent tool keeps inside the main checkout no longer need an exclusion: `inspect` lists them under `linked_worktrees_inside`, and `checkpoint` skips each one automatically and records it as `linked_worktree_captured_separately`. Checkpoint each linked worktree on its own. A `.git` file that is not provably this repository's own registration still counts as a nested repository.
 6. Verify every checkpoint (`timber --store <store> --json verify <id>`) and keep the verification output with the id.
+7. Once the standing exclusions and store of a repository are known, record them once in a committed `timber.toml` (`timber init <worktree>` writes a commented template and never overwrites). Every later `checkpoint` of that repository then applies the file's exclusions without flags and records them as `excluded_by_convention_file`, distinct from your per-run `excluded_by_operator` choices. Check the first line Timber prints to standard error (`read convention file ...` or `no convention file found at ...`) and the `convention` block of the result before trusting a run; a person reviews and commits the file, not the agent alone. `schedule` is a note; Timber never runs anything on its own.
 
 ## 4. What Timber will refuse, and what to do
 
@@ -42,6 +43,9 @@ Unknown stays unknown. Timber supplies the evidence for the first three columns 
 | nested repository refused | a `.git` below the worktree | exclude a disposable folder for the run, or handle that repository separately |
 | --exclude refused for tracked path | the exclusion covers a file Git tracks | narrow the exclusion to the untracked or ignored folder |
 | source changed | something wrote into the worktree during capture | stop writers, rerun |
+| unknown key in timber.toml | the convention file holds a key Timber does not know, named in the message | remove or correct that key; only `store`, `exclude`, `git_timeout_seconds` and `schedule` exist |
+| timber.toml exclude refused | a convention exclusion covers a tracked path, matches nothing, or passes through a symbolic link | correct the entry in `timber.toml`; the same rules as `--exclude` apply |
+| convention file already exists | `timber init` found a `timber.toml` | edit the existing file; init never overwrites |
 | submodule unreadable | a gitlink whose path is missing, holds files without a `.git`, or whose HEAD cannot be read | initialize or repair that submodule, or handle it separately; readable submodules are recorded as pointers and their contents are never captured |
 | Git operation `...` exceeded the N-second limit | one Git call hit the time limit, named in the message | result is partial and the source unchanged; rerun with a larger `--git-timeout <seconds>` (default 120) or on a smaller scope |
 | Worktree directory is absent | registration with no folder | check for an unmounted volume before any prune |
