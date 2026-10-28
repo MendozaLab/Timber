@@ -142,7 +142,7 @@ For folders whose tracked work is held in another repository, explicit `import -
 
 ## Verification and performance
 
-The current source passed **80 automated tests** locally on macOS with Rust 1.98.1 and Rust 1.85.1, along with formatting and strict Clippy checks. The tests use disposable synthetic repositories and require no private project data or provider account. A configured GitHub Actions matrix is separate from a passing hosted run.
+On 28 October 2026, the current source passed **134 automated tests** locally on macOS with Rust 1.98.1 and Rust 1.85.1, along with formatting and strict Clippy checks. The tests use disposable synthetic repositories and require no private project data or provider account. A configured GitHub Actions matrix is separate from a passing hosted run.
 
 The [reproducible demonstration](docs/DEMO.md) covers successful and refused operations, recovery without original repositories, source drift, and corruption detection. Its recorded sample remains bound to the revision and executable identified there.
 
