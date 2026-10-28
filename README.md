@@ -147,7 +147,7 @@ cargo test --locked
 
 Bug reports and focused contributions are welcome. Use invented data for reproductions and retain expected refusals as well as successful cases. Read [CONTRIBUTING.md](CONTRIBUTING.md) before sharing reports or changes.
 
-Further documentation: [user guide](docs/USER-GUIDE.md), [agent operator guide](docs/AGENT-OPERATORS.md), [field learnings](docs/FIELD-LEARNINGS.md), [changelog](CHANGELOG.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
+Further documentation: [user guide](docs/USER-GUIDE.md), [agent operator guide](docs/AGENT-OPERATORS.md), [deployment models](docs/DEPLOYMENT-MODELS.md), [field learnings](docs/FIELD-LEARNINGS.md), [changelog](CHANGELOG.md), [architecture](docs/ARCHITECTURE.md), [supported states](docs/SUPPORTED-STATES.md), [safety boundaries](docs/SAFETY.md), [demonstration](docs/DEMO.md), and [performance](docs/PERFORMANCE.md).
 
 ## License
 
