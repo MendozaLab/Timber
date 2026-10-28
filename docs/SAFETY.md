@@ -14,6 +14,8 @@ No project code runs automatically. A clean mechanical merge still requires deli
 
 A capture is not complete until its referenced data and completed manifest have been durably published. Interrupted operations remain incomplete. Reusing an incomplete operation as a verified checkpoint is prohibited.
 
+An incomplete capture stays in the store, with its marker and every object it wrote, until an operator runs `timber gc`; Timber never deletes on its own, and a refusal message names the marker, its bytes and `timber gc --dry-run`. Each marker journals the objects its run added, for attribution only. `gc` removes markers and only those objects no completed manifest references, and it never touches completed checkpoints or anything outside the store. It refuses before deleting anything when a completed manifest references a missing object, and while a capture holds the store.
+
 Verification recomputes stored-content hashes and reconstructs the captured supported state. Missing data, mismatched content, unexpected restored files, changed modes, or mismatched Git state cause failure. Preserve the error and original data; do not bypass verification to reclaim space.
 
 ## Concurrent writers

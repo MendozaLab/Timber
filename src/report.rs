@@ -545,11 +545,53 @@ pub fn terminal(value: &Value) -> String {
         let _ = writeln!(out, "Command: {}", clean_terminal(command));
     }
     terminal_inspection_summary(body, &mut out);
+    terminal_reclamation_summary(body, &mut out);
     terminal_value(body, &mut out, 0);
     out.push_str(
         "\nTimber does not apply changes to source worktrees. Cleanup requires separate human review.\n",
     );
     out
+}
+
+fn terminal_reclamation_summary(body: &Value, out: &mut String) {
+    let Some(kept) = body
+        .get("kept")
+        .filter(|_| body.get("unreferenced_objects").is_some())
+    else {
+        return;
+    };
+    let n = |value: &Value| value.as_u64().unwrap_or(0);
+    let objects = body["unreferenced_objects"].as_array().map_or(0, Vec::len);
+    let markers = body["incomplete_markers"].as_array().map_or(0, Vec::len);
+    match body.get("removed").filter(|r| !r.is_null()) {
+        Some(removed) => {
+            let _ = writeln!(
+                out,
+                "Removed: {} bytes ({} incomplete markers, {} objects of {} bytes, {} stray items of {} bytes).",
+                n(&removed["total_bytes"]),
+                removed["markers"].as_array().map_or(0, Vec::len),
+                n(&removed["objects"]),
+                n(&removed["object_bytes"]),
+                n(&removed["stray_items"]),
+                n(&removed["stray_bytes"])
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "Would reclaim: {} bytes ({markers} incomplete markers; {objects} objects of {} bytes referenced by no completed checkpoint). Nothing was written.",
+                n(&body["reclaimable_bytes"]),
+                n(&body["unreferenced_object_bytes"])
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        "Kept: {} completed checkpoints referencing {} objects of {} bytes.",
+        n(&kept["completed_checkpoints"]),
+        n(&kept["referenced_objects"]),
+        n(&kept["referenced_bytes"])
+    );
 }
 
 fn terminal_inspection_summary(body: &Value, out: &mut String) {
@@ -634,7 +676,11 @@ fn terminal_value(value: &Value, out: &mut String, depth: usize) {
     match value {
         Value::Object(fields) if depth < 12 => {
             for (key, value) in fields {
-                if matches!(key.as_str(), "payload_rows" | "tracked_rows") && value.is_array() {
+                if matches!(
+                    key.as_str(),
+                    "payload_rows" | "tracked_rows" | "unreferenced_objects"
+                ) && value.is_array()
+                {
                     let _ = writeln!(
                         out,
                         "{indent}{}: {} rows; use --json for full per-file evidence",

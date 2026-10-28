@@ -5,15 +5,141 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
-    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+    os::unix::{
+        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        io::AsRawFd,
+    },
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 
 #[derive(Debug, Clone)]
 pub struct Store {
     pub root: PathBuf,
+    /// Present only on the handle a capture writes through: every object that run
+    /// adds (not one that already existed) is appended to its incomplete marker.
+    journal: Option<Arc<Journal>>,
+}
+
+/// Version of the object journal carried by incomplete markers. A marker header
+/// without a `journal` key was written by an earlier Timber and has no journal.
+pub const JOURNAL_FORMAT: u32 = 1;
+
+/// The append-only object journal of one capture's incomplete marker. Each object
+/// the run adds is written as one JSON line after the header and synced before the
+/// capture continues, so an aborted run leaves an accurate record of what it added.
+#[derive(Debug)]
+pub struct Journal {
+    state: Mutex<JournalState>,
+}
+
+#[derive(Debug)]
+struct JournalState {
+    file: File,
+    objects: u64,
+    bytes: u64,
+}
+
+impl Journal {
+    pub(crate) fn new(file: File) -> Self {
+        Self {
+            state: Mutex::new(JournalState {
+                file,
+                objects: 0,
+                bytes: 0,
+            }),
+        }
+    }
+
+    fn record(&self, digest: &str, bytes: u64) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("capture journal is unavailable"))?;
+        let mut line = serde_json::to_vec(&serde_json::json!({"object": digest, "bytes": bytes}))?;
+        line.push(b'\n');
+        state
+            .file
+            .write_all(&line)
+            .context("append to capture journal")?;
+        state.file.sync_data().context("sync capture journal")?;
+        state.objects += 1;
+        state.bytes += bytes;
+        Ok(())
+    }
+
+    /// Objects this run added to the store, and their bytes.
+    pub fn totals(&self) -> (u64, u64) {
+        self.state
+            .lock()
+            .map(|s| (s.objects, s.bytes))
+            .unwrap_or((0, 0))
+    }
+}
+
+/// An advisory lock on the store root, released when dropped. Captures hold it
+/// shared for their whole run; `gc` holds it exclusively, so reclamation never
+/// overlaps a capture in progress.
+#[derive(Debug)]
+pub struct StoreLock {
+    _file: File,
+}
+
+/// Applies `flock` to an open file. `Ok(false)` means another holder conflicts.
+pub(crate) fn try_flock(file: &File, exclusive: bool) -> Result<bool> {
+    let operation = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    } | libc::LOCK_NB;
+    // SAFETY: the descriptor is owned by `file` and stays open for the call.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return Ok(false);
+    }
+    Err(error).context("lock store item")
+}
+
+/// Like [`try_flock`], with a short bounded wait (about one second) that covers a
+/// holder just finishing, including a descriptor briefly duplicated into a child
+/// process between its fork and exec.
+pub(crate) fn flock_waiting(file: &File, exclusive: bool) -> Result<bool> {
+    for attempt in 0..40 {
+        if try_flock(file, exclusive)? {
+            return Ok(true);
+        }
+        if attempt < 39 {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+    Ok(false)
+}
+
+/// Every stored object a completed manifest depends on: captured file and symbolic
+/// link contents, the history bundle, staged index blobs, and dependency bundles.
+pub fn referenced_objects(manifest: &Manifest) -> BTreeSet<String> {
+    let mut objects = BTreeSet::new();
+    for entry in &manifest.entries {
+        if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
+            objects.insert(entry.sha256.clone());
+        }
+    }
+    if let Some(git) = &manifest.git {
+        objects.insert(git.bundle.clone());
+        for entry in &git.index {
+            objects.insert(entry.blob.clone());
+        }
+    }
+    for dependency in &manifest.captured_dependencies {
+        objects.insert(dependency.bundle.clone());
+    }
+    objects
 }
 
 pub fn valid_digest(value: &str) -> bool {
@@ -45,7 +171,7 @@ fn private_directory(path: &Path) -> Result<()> {
     check_private_directory(path)
 }
 
-fn check_private_directory(path: &Path) -> Result<()> {
+pub(crate) fn check_private_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(
         metadata.is_dir() && !metadata.file_type().is_symlink(),
@@ -64,7 +190,7 @@ fn check_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn read_regular(path: &Path, maximum: Option<u64>) -> Result<Vec<u8>> {
+pub(crate) fn read_regular(path: &Path, maximum: Option<u64>) -> Result<Vec<u8>> {
     let mut file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -88,7 +214,10 @@ impl Store {
         for name in ["objects", "checkpoints", "incomplete"] {
             check_private_directory(&root.join(name))?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            journal: None,
+        })
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -97,10 +226,46 @@ impl Store {
         for name in ["objects", "checkpoints", "incomplete"] {
             private_directory(&root.join(name))?;
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            journal: None,
+        })
     }
 
-    fn write_immutable(&self, directory: &str, name: &str, bytes: &[u8]) -> Result<()> {
+    /// A handle that journals every object it adds into the given capture journal.
+    pub fn journaled(&self, journal: Arc<Journal>) -> Self {
+        Self {
+            root: self.root.clone(),
+            journal: Some(journal),
+        }
+    }
+
+    fn lock(&self, exclusive: bool) -> Result<Option<StoreLock>> {
+        check_private_directory(&self.root)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
+            .open(&self.root)
+            .context("open store root for locking")?;
+        Ok(flock_waiting(&file, exclusive)?.then_some(StoreLock { _file: file }))
+    }
+
+    /// Shared lock held by a capture for its whole run. Refused while `timber gc`
+    /// is reclaiming this store.
+    pub fn capture_lock(&self) -> Result<StoreLock> {
+        self.lock(false)?
+            .context("store is being reclaimed by `timber gc`; retry the capture after it finishes")
+    }
+
+    /// Exclusive lock for reclamation. Refused while any capture is in progress.
+    pub fn reclaim_lock(&self) -> Result<StoreLock> {
+        self.lock(true)?.context(
+            "gc refused: a capture or another gc is in progress in this store; nothing was removed; retry after it finishes",
+        )
+    }
+
+    /// Writes an immutable item; `Ok(true)` only when this call created it.
+    fn write_immutable(&self, directory: &str, name: &str, bytes: &[u8]) -> Result<bool> {
         check_private_directory(&self.root)?;
         let parent = self.root.join(directory);
         check_private_directory(&parent)?;
@@ -115,7 +280,7 @@ impl Store {
                 read_regular(&path, None)? == bytes,
                 "immutable stored item differs: {name}"
             );
-            return Ok(());
+            return Ok(false);
         }
         let mut temporary = tempfile::NamedTempFile::new_in(&parent)?;
         temporary
@@ -123,23 +288,28 @@ impl Store {
             .set_permissions(fs::Permissions::from_mode(0o600))?;
         temporary.write_all(bytes)?;
         temporary.as_file().sync_all()?;
-        match temporary.persist_noclobber(&path) {
-            Ok(_) => (),
+        let created = match temporary.persist_noclobber(&path) {
+            Ok(_) => true,
             Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
                 ensure!(
                     read_regular(&path, None)? == bytes,
                     "concurrent immutable stored item differs"
                 );
+                false
             }
             Err(error) => return Err(error.error.into()),
-        }
+        };
         File::open(&parent)?.sync_all()?;
-        Ok(())
+        Ok(created)
     }
 
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
         let hash = fsx::digest(bytes);
-        self.write_immutable("objects", &hash, bytes)?;
+        if self.write_immutable("objects", &hash, bytes)? {
+            if let Some(journal) = &self.journal {
+                journal.record(&hash, bytes.len() as u64)?;
+            }
+        }
         Ok(hash)
     }
 
@@ -197,25 +367,15 @@ impl Store {
             manifest_id(manifest)? == manifest.id,
             "manifest digest does not match identity"
         );
-        for entry in &manifest.entries {
-            if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
-                self.get(&entry.sha256)?;
-            }
-        }
-        if let Some(git) = &manifest.git {
-            self.get(&git.bundle)?;
-            for entry in &git.index {
-                self.get(&entry.blob)?;
-            }
-        }
-        for dependency in &manifest.captured_dependencies {
-            self.get(&dependency.bundle)?;
+        for object in referenced_objects(manifest) {
+            self.get(&object)?;
         }
         self.write_immutable(
             "checkpoints",
             &format!("{}.json", manifest.id),
             &serde_json::to_vec_pretty(manifest)?,
         )
+        .map(|_| ())
     }
 }
 

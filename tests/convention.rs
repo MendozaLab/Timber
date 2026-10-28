@@ -582,3 +582,49 @@ fn convention_exclusions_coexist_with_linked_worktrees_inside() {
         "{error:#}"
     );
 }
+
+#[test]
+fn convention_capture_refused_by_foreign_nested_repository_keeps_journaled_marker() {
+    let f = Fixture::new();
+    // The convention excludes only `scratch/`; the foreign nested repository below
+    // `artifacts/` is not covered, so the capture walk refuses it after the marker.
+    f.convention("exclude = [\"scratch/\"]\n");
+    let store = f.path("store");
+    let out = f.run(&["--store", s(&store), "checkpoint", s(&f.repo)]);
+    assert!(!out.status.success());
+    let message = stderr(&out);
+    assert!(message.contains("nested repository refused"), "{message}");
+    assert!(message.contains("artifacts/run-1"), "{message}");
+    let markers = fs::read_dir(store.join("incomplete"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("capture-"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(markers.len(), 1);
+    let id = markers[0].file_stem().unwrap().to_str().unwrap().to_owned();
+    assert!(
+        message.contains(&format!("incomplete marker {id}")),
+        "{message}"
+    );
+    assert!(message.contains("`timber gc --dry-run`"), "{message}");
+    let bytes = fs::read(&markers[0]).unwrap();
+    let header = serde_json::Deserializer::from_slice(&bytes)
+        .into_iter::<Value>()
+        .next()
+        .unwrap()
+        .unwrap();
+    assert_eq!(header["journal"], 1);
+    let opened = Store::existing(&store).unwrap();
+    assert!(opened.list().unwrap().is_empty());
+    let report = timber_worktrees::gc::dry_run(&opened).unwrap();
+    assert_eq!(report.incomplete_markers.len(), 1);
+    assert_eq!(report.incomplete_markers[0].id, id);
+    assert_eq!(
+        report.incomplete_markers[0].journal,
+        timber_worktrees::gc::JournalState::Present
+    );
+}

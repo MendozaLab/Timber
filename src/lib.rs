@@ -5,6 +5,7 @@ pub mod capture;
 pub mod convention;
 pub mod dependencies;
 pub mod fsx;
+pub mod gc;
 pub mod git;
 pub mod inspect;
 pub mod model;

@@ -2,7 +2,9 @@
 use crate::{
     fsx, git,
     model::*,
-    store::{Store, manifest_id, valid_oid, validate_import_map},
+    store::{
+        JOURNAL_FORMAT, Journal, Store, StoreLock, manifest_id, valid_oid, validate_import_map,
+    },
 };
 use anyhow::{Context, Result, bail, ensure};
 use std::{
@@ -10,33 +12,72 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn started(store: &Store, source: &Path, kind: &str) -> Result<PathBuf> {
+/// A capture's incomplete marker in `store/incomplete/`. It stays until the
+/// completed manifest is published; a refused run leaves it, with its journal of
+/// the objects that run added, for `timber gc --dry-run` to report.
+struct Marker {
+    path: PathBuf,
+    id: String,
+    journal: Arc<Journal>,
+    _lock: StoreLock,
+}
+
+impl Marker {
+    /// Names the retained marker, the bytes it holds and the reclamation review
+    /// command. Nothing is deleted here or anywhere else automatically.
+    fn refused(&self, error: anyhow::Error) -> anyhow::Error {
+        let (objects, bytes) = self.journal.totals();
+        error.context(format!(
+            "capture refused; incomplete marker {} is kept in the store and holds {bytes} bytes in {objects} objects this run added; review what can be reclaimed with `timber gc --dry-run` (Timber never deletes automatically)",
+            self.id
+        ))
+    }
+
+    fn finish(self, store: &Store) -> Result<()> {
+        fs::remove_file(&self.path)?;
+        File::open(store.root.join("incomplete"))?.sync_all()?;
+        Ok(())
+    }
+}
+
+fn started(store: &Store, source: &Path, kind: &str) -> Result<Marker> {
+    let lock = store.capture_lock()?;
     let mut marker = tempfile::Builder::new()
-        .prefix("capture-")
-        .suffix(".json")
+        .prefix(crate::gc::MARKER_PREFIX)
+        .suffix(crate::gc::MARKER_SUFFIX)
         .tempfile_in(store.root.join("incomplete"))?;
+    // Held for the whole run: `gc --dry-run` reports a locked marker as in progress.
+    ensure!(
+        crate::store::try_flock(marker.as_file(), true)?,
+        "new incomplete marker is already locked"
+    );
     serde_json::to_writer_pretty(
         &mut marker,
-        &serde_json::json!({"schema":SCHEMA,"operation":kind,"source":source,"complete":false,"started_unix":now()?}),
+        &serde_json::json!({"schema":SCHEMA,"operation":kind,"source":source,"complete":false,"started_unix":now()?,"journal":JOURNAL_FORMAT}),
     )?;
     marker.write_all(b"\n")?;
     marker.as_file().sync_all()?;
-    let (_, path) = marker.keep()?;
+    let (file, path) = marker.keep()?;
     File::open(store.root.join("incomplete"))?.sync_all()?;
-    Ok(path)
+    let id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .context("non UTF-8 incomplete marker name")?
+        .to_owned();
+    Ok(Marker {
+        path,
+        id,
+        journal: Arc::new(Journal::new(file)),
+        _lock: lock,
+    })
 }
 
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
-}
-fn finish(store: &Store, marker: &Path, manifest: &Manifest) -> Result<()> {
-    store.publish(manifest)?;
-    fs::remove_file(marker)?;
-    File::open(store.root.join("incomplete"))?.sync_all()?;
-    Ok(())
 }
 fn nul_strings(bytes: &[u8]) -> Result<Vec<String>> {
     bytes
@@ -568,187 +609,194 @@ pub fn checkpoint_with_convention(
         selectors.push(selector);
     }
     let marker = started(store, &source, "checkpoint")?;
-    // Gitlinks are recorded as pointers: their directories are pruned from the file
-    // walk so a submodule's `.git` and files are never read.
-    let index_before = read_index(&source)?;
-    let submodules = submodule_records(&source, &index_before)?;
-    let gitlinks = submodules
-        .iter()
-        .map(|s| s.path.clone())
-        .collect::<BTreeSet<_>>();
-    let scan = |include: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
-        let mut entries = fsx::inventory_pruned(
-            &source,
-            |p| gitlinks.contains(p) || linked.contains_key(p) || prune(p),
-            include,
-        )?;
-        entries.extend(submodules.iter().map(|s| Entry {
-            path: s.path.clone(),
-            kind: EntryKind::Submodule,
-            mode: 0,
-            size: 0,
-            sha256: String::new(),
-        }));
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        fsx::validate_entries(&entries)?;
-        Ok(entries)
-    };
-    let ignored = ignored_paths(&source)?;
-    for selector in &selectors {
+    let journaled = store.journaled(marker.journal.clone());
+    let store = &journaled;
+    let run = || -> Result<Manifest> {
+        // Gitlinks are recorded as pointers: their directories are pruned from the file
+        // walk so a submodule's `.git` and files are never read.
+        let index_before = read_index(&source)?;
+        let submodules = submodule_records(&source, &index_before)?;
+        let gitlinks = submodules
+            .iter()
+            .map(|s| s.path.clone())
+            .collect::<BTreeSet<_>>();
+        let scan = |include: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
+            let mut entries = fsx::inventory_pruned(
+                &source,
+                |p| gitlinks.contains(p) || linked.contains_key(p) || prune(p),
+                include,
+            )?;
+            entries.extend(submodules.iter().map(|s| Entry {
+                path: s.path.clone(),
+                kind: EntryKind::Submodule,
+                mode: 0,
+                size: 0,
+                sha256: String::new(),
+            }));
+            entries.sort_by(|a, b| a.path.cmp(&b.path));
+            fsx::validate_entries(&entries)?;
+            Ok(entries)
+        };
+        let ignored = ignored_paths(&source)?;
+        for selector in &selectors {
+            ensure!(
+                ignored
+                    .iter()
+                    .any(|p| included(p, std::slice::from_ref(selector))),
+                "ignored selector matches no ignored files: {selector}"
+            );
+        }
+        let exclude = |p: &str| ignored.contains(p) && !included(p, &selectors);
+        let entries = scan(&|p| !exclude(p))?;
+        for (selector, reason) in &declared {
+            ensure!(
+                pruned.borrow().contains(selector),
+                "{} matched nothing during capture: {selector}",
+                exclusion_label(reason)
+            );
+        }
+        let head = git::text(&source, &["rev-parse", "--verify", "HEAD"])?;
+        let branch = git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok();
+        let object_ids = index_before
+            .iter()
+            .filter(|(_, mode, _)| mode != GITLINK_MODE)
+            .map(|(_, _, oid)| oid.clone())
+            .collect::<Vec<_>>();
+        let mut staged_objects = BTreeMap::new();
+        git::for_each_blob(&source, &object_ids, |oid, bytes| {
+            staged_objects.insert(oid.to_owned(), store.put(&bytes)?);
+            Ok(())
+        })?;
+        let mut index = Vec::new();
+        for (path, mode, oid) in index_before.iter().filter(|(_, m, _)| m != GITLINK_MODE) {
+            index.push(IndexEntry {
+                path: path.clone(),
+                mode: mode.clone(),
+                oid: oid.clone(),
+                blob: staged_objects
+                    .get(oid)
+                    .context("staged Git blob was not captured")?
+                    .clone(),
+            });
+        }
+        persist_entries(store, &source, &entries)?;
+        let staging = tempfile::Builder::new()
+            .prefix("bundle-")
+            .tempdir_in(store.root.join("incomplete"))?;
+        let bundle_path = staging.path().join("history.bundle");
+        let bundle_str = bundle_path.to_str().context("bundle path must be UTF-8")?;
+        git::run(&source, &["bundle", "create", bundle_str, "HEAD"])?;
+        let bundle = store.put(&fs::read(&bundle_path)?)?;
         ensure!(
-            ignored
-                .iter()
-                .any(|p| included(p, std::slice::from_ref(selector))),
-            "ignored selector matches no ignored files: {selector}"
+            entries == scan(&|p| !exclude(p))?,
+            "working files changed during capture; checkpoint remains incomplete"
         );
-    }
-    let exclude = |p: &str| ignored.contains(p) && !included(p, &selectors);
-    let entries = scan(&|p| !exclude(p))?;
-    for (selector, reason) in &declared {
         ensure!(
-            pruned.borrow().contains(selector),
-            "{} matched nothing during capture: {selector}",
-            exclusion_label(reason)
+            index_before == read_index(&source)?,
+            "index changed during capture"
         );
-    }
-    let head = git::text(&source, &["rev-parse", "--verify", "HEAD"])?;
-    let branch = git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok();
-    let object_ids = index_before
-        .iter()
-        .filter(|(_, mode, _)| mode != GITLINK_MODE)
-        .map(|(_, _, oid)| oid.clone())
-        .collect::<Vec<_>>();
-    let mut staged_objects = BTreeMap::new();
-    git::for_each_blob(&source, &object_ids, |oid, bytes| {
-        staged_objects.insert(oid.to_owned(), store.put(&bytes)?);
-        Ok(())
-    })?;
-    let mut index = Vec::new();
-    for (path, mode, oid) in index_before.iter().filter(|(_, m, _)| m != GITLINK_MODE) {
-        index.push(IndexEntry {
-            path: path.clone(),
-            mode: mode.clone(),
-            oid: oid.clone(),
-            blob: staged_objects
-                .get(oid)
-                .context("staged Git blob was not captured")?
-                .clone(),
-        });
-    }
-    persist_entries(store, &source, &entries)?;
-    let staging = tempfile::Builder::new()
-        .prefix("bundle-")
-        .tempdir_in(store.root.join("incomplete"))?;
-    let bundle_path = staging.path().join("history.bundle");
-    let bundle_str = bundle_path.to_str().context("bundle path must be UTF-8")?;
-    git::run(&source, &["bundle", "create", bundle_str, "HEAD"])?;
-    let bundle = store.put(&fs::read(&bundle_path)?)?;
-    ensure!(
-        entries == scan(&|p| !exclude(p))?,
-        "working files changed during capture; checkpoint remains incomplete"
-    );
-    ensure!(
-        index_before == read_index(&source)?,
-        "index changed during capture"
-    );
-    let submodules_after = submodule_records(&source, &index_before)?;
-    if let Some(changed) = submodules
-        .iter()
-        .zip(&submodules_after)
-        .find(|(a, b)| a != b)
-    {
-        bail!(
-            "submodule checkout changed during capture: {}",
-            changed.0.path
+        let submodules_after = submodule_records(&source, &index_before)?;
+        if let Some(changed) = submodules
+            .iter()
+            .zip(&submodules_after)
+            .find(|(a, b)| a != b)
+        {
+            bail!(
+                "submodule checkout changed during capture: {}",
+                changed.0.path
+            );
+        }
+        ensure!(
+            head == git::text(&source, &["rev-parse", "--verify", "HEAD"])?
+                && branch == git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok(),
+            "HEAD identity changed during capture"
         );
-    }
-    ensure!(
-        head == git::text(&source, &["rev-parse", "--verify", "HEAD"])?
-            && branch == git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok(),
-        "HEAD identity changed during capture"
-    );
-    ensure!(
-        ignored == ignored_paths(&source)?,
-        "ignored path coverage changed during capture"
-    );
-    validate_worktree(&source)?;
-    ensure!(
-        linked == linked_worktrees_inside(&source, &declared, &gitlinks)?,
-        "linked worktrees inside the worktree changed during capture"
-    );
-    ensure!(
-        protected_roots == git::protected_roots(&source)?,
-        "registered worktree or shared Git roots changed during capture"
-    );
-    // Persist canonical existing roots so an unavailable original does not require
-    // filesystem resolution merely to validate the checkpoint later.
-    let mut protected_roots = protected_roots
-        .iter()
-        .map(|path| {
-            let path = path.canonicalize().unwrap_or_else(|_| path.clone());
-            path.to_str()
-                .context("non UTF-8 protected root")
-                .map(str::to_owned)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    protected_roots.sort();
-    protected_roots.dedup();
-    // Operator exclusions come first, then convention-file exclusions, then linked
-    // worktrees skipped automatically. Ignored omissions keep their own records, even
-    // below a skipped folder, so later assessment compares like with like.
-    let excluded = declared
-        .iter()
-        .filter(|(_, reason)| *reason == EXCLUDED_BY_OPERATOR)
-        .chain(
-            declared
-                .iter()
-                .filter(|(_, reason)| *reason == EXCLUDED_BY_CONVENTION_FILE),
-        )
-        .map(|(path, reason)| Exclusion {
-            path: path.clone(),
-            reason: (*reason).into(),
-        })
-        .chain(linked.keys().map(|path| Exclusion {
-            path: path.clone(),
-            reason: LINKED_WORKTREE_CAPTURED_SEPARATELY.into(),
-        }))
-        .chain(
-            ignored
-                .into_iter()
-                .filter(|p| !included(p, &selectors))
-                .map(|path| Exclusion {
-                    path,
-                    reason: "ignored file not explicitly selected".into(),
-                }),
-        )
-        .collect();
-    let mut manifest = Manifest {
-        schema: SCHEMA,
-        id: String::new(),
-        source_kind: "worktree".into(),
-        source_path: source.to_str().context("non UTF-8 source root")?.into(),
-        created_unix: now()?,
-        entries,
-        git: Some(GitState {
-            head,
-            branch,
-            object_format: "sha1".into(),
-            index,
-            bundle,
-            protected_roots,
-            submodules,
-        }),
-        excluded,
-        capture: CaptureConditions {
-            scans_matched: true,
-            writers_paused_declared: writers_paused,
-            writer_exclusion_enforced: false,
-        },
-        import_map: None,
-        captured_dependencies: Vec::new(),
+        ensure!(
+            ignored == ignored_paths(&source)?,
+            "ignored path coverage changed during capture"
+        );
+        validate_worktree(&source)?;
+        ensure!(
+            linked == linked_worktrees_inside(&source, &declared, &gitlinks)?,
+            "linked worktrees inside the worktree changed during capture"
+        );
+        ensure!(
+            protected_roots == git::protected_roots(&source)?,
+            "registered worktree or shared Git roots changed during capture"
+        );
+        // Persist canonical existing roots so an unavailable original does not require
+        // filesystem resolution merely to validate the checkpoint later.
+        let mut protected_roots = protected_roots
+            .iter()
+            .map(|path| {
+                let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+                path.to_str()
+                    .context("non UTF-8 protected root")
+                    .map(str::to_owned)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        protected_roots.sort();
+        protected_roots.dedup();
+        // Operator exclusions come first, then convention-file exclusions, then linked
+        // worktrees skipped automatically. Ignored omissions keep their own records, even
+        // below a skipped folder, so later assessment compares like with like.
+        let excluded = declared
+            .iter()
+            .filter(|(_, reason)| *reason == EXCLUDED_BY_OPERATOR)
+            .chain(
+                declared
+                    .iter()
+                    .filter(|(_, reason)| *reason == EXCLUDED_BY_CONVENTION_FILE),
+            )
+            .map(|(path, reason)| Exclusion {
+                path: path.clone(),
+                reason: (*reason).into(),
+            })
+            .chain(linked.keys().map(|path| Exclusion {
+                path: path.clone(),
+                reason: LINKED_WORKTREE_CAPTURED_SEPARATELY.into(),
+            }))
+            .chain(
+                ignored
+                    .into_iter()
+                    .filter(|p| !included(p, &selectors))
+                    .map(|path| Exclusion {
+                        path,
+                        reason: "ignored file not explicitly selected".into(),
+                    }),
+            )
+            .collect();
+        let mut manifest = Manifest {
+            schema: SCHEMA,
+            id: String::new(),
+            source_kind: "worktree".into(),
+            source_path: source.to_str().context("non UTF-8 source root")?.into(),
+            created_unix: now()?,
+            entries,
+            git: Some(GitState {
+                head,
+                branch,
+                object_format: "sha1".into(),
+                index,
+                bundle,
+                protected_roots,
+                submodules,
+            }),
+            excluded,
+            capture: CaptureConditions {
+                scans_matched: true,
+                writers_paused_declared: writers_paused,
+                writer_exclusion_enforced: false,
+            },
+            import_map: None,
+            captured_dependencies: Vec::new(),
+        };
+        manifest.id = manifest_id(&manifest)?;
+        store.publish(&manifest)?;
+        Ok(manifest)
     };
-    manifest.id = manifest_id(&manifest)?;
-    finish(store, &marker, &manifest)?;
+    let manifest = run().map_err(|error| marker.refused(error))?;
+    marker.finish(store)?;
     Ok(manifest)
 }
 
@@ -784,53 +832,60 @@ pub fn import_folder_with_dependencies(
         }
     }
     let marker = started(store, &source, "folder_import")?;
-    let captured_dependencies = if let Some(repo) = dependency_repo {
-        let map = map
-            .as_ref()
-            .context("dependency capture requires an explicit import map")?;
-        ensure!(
-            !map.git_dependencies.is_empty(),
-            "import map has no Git dependencies to capture"
-        );
-        crate::dependencies::capture(store, repo, &map.git_dependencies)?
-    } else {
-        Vec::new()
-    };
-    let entries = fsx::inventory(&source)?;
-    if let Some(map) = &map {
-        for file in &map.files {
+    let journaled = store.journaled(marker.journal.clone());
+    let store = &journaled;
+    let run = || -> Result<Manifest> {
+        let captured_dependencies = if let Some(repo) = dependency_repo {
+            let map = map
+                .as_ref()
+                .context("dependency capture requires an explicit import map")?;
             ensure!(
-                entries
-                    .iter()
-                    .any(|e| e.path == file.stored_path && e.kind != EntryKind::Directory),
-                "mapped source file is missing: {}",
-                file.stored_path
+                !map.git_dependencies.is_empty(),
+                "import map has no Git dependencies to capture"
             );
+            crate::dependencies::capture(store, repo, &map.git_dependencies)?
+        } else {
+            Vec::new()
+        };
+        let entries = fsx::inventory(&source)?;
+        if let Some(map) = &map {
+            for file in &map.files {
+                ensure!(
+                    entries
+                        .iter()
+                        .any(|e| e.path == file.stored_path && e.kind != EntryKind::Directory),
+                    "mapped source file is missing: {}",
+                    file.stored_path
+                );
+            }
         }
-    }
-    persist_entries(store, &source, &entries)?;
-    ensure!(
-        entries == fsx::inventory(&source)?,
-        "folder changed during import"
-    );
-    let mut manifest = Manifest {
-        schema: SCHEMA,
-        id: String::new(),
-        source_kind: "folder".into(),
-        source_path: source.to_str().context("non UTF-8 source root")?.into(),
-        created_unix: now()?,
-        entries,
-        git: None,
-        excluded: Vec::new(),
-        capture: CaptureConditions {
-            scans_matched: true,
-            writers_paused_declared: writers_paused,
-            writer_exclusion_enforced: false,
-        },
-        import_map: map,
-        captured_dependencies,
+        persist_entries(store, &source, &entries)?;
+        ensure!(
+            entries == fsx::inventory(&source)?,
+            "folder changed during import"
+        );
+        let mut manifest = Manifest {
+            schema: SCHEMA,
+            id: String::new(),
+            source_kind: "folder".into(),
+            source_path: source.to_str().context("non UTF-8 source root")?.into(),
+            created_unix: now()?,
+            entries,
+            git: None,
+            excluded: Vec::new(),
+            capture: CaptureConditions {
+                scans_matched: true,
+                writers_paused_declared: writers_paused,
+                writer_exclusion_enforced: false,
+            },
+            import_map: map,
+            captured_dependencies,
+        };
+        manifest.id = manifest_id(&manifest)?;
+        store.publish(&manifest)?;
+        Ok(manifest)
     };
-    manifest.id = manifest_id(&manifest)?;
-    finish(store, &marker, &manifest)?;
+    let manifest = run().map_err(|error| marker.refused(error))?;
+    marker.finish(store)?;
     Ok(manifest)
 }

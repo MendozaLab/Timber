@@ -11,7 +11,7 @@ use std::{
 use timber_worktrees::{
     capture,
     convention::{self, Convention, Overridden},
-    fsx, inspect,
+    fsx, gc, inspect,
     model::{ImportMap, Layer, Plan, Selection},
     planning, preview, report, restore,
     store::Store,
@@ -133,6 +133,13 @@ enum Commands {
     },
     /// Recheck current sources and explain blockers. Does not authorize deletion.
     Assess { plan: PathBuf },
+    /// Reclaim incomplete captures inside the store. Takes no source path; removes
+    /// only incomplete markers and objects no completed checkpoint references.
+    Gc {
+        /// Report markers, unreferenced objects and reclaimable bytes; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Render saved results as a self-contained local HTML report.
     Report {
         result: PathBuf,
@@ -508,6 +515,25 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             let result = planning::assess(&store, &plan)?;
             code = 1; // An assessment never grants permission to clean up a source.
             ("assess", result)
+        }
+        Commands::Gc { dry_run } => {
+            let store = Store::existing(&flag_store()?)?;
+            let roots = store
+                .list()
+                .context("gc refused: a completed checkpoint manifest cannot be read; nothing was removed")?
+                .iter()
+                .flat_map(manifest_roots)
+                .collect::<Vec<_>>();
+            protect_output(cli.out.as_deref(), &roots)?;
+            let result = if *dry_run {
+                gc::dry_run(&store)?
+            } else {
+                gc::reclaim(&store)?
+            };
+            if !result.missing_references.is_empty() {
+                code = 1;
+            }
+            (if *dry_run { "gc_dry_run" } else { "gc" }, value(result)?)
         }
         Commands::Report { result, to } => {
             let result: Value = read_json(result)?;

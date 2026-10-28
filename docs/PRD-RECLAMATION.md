@@ -1,6 +1,6 @@
 # Product requirements: reclaim incomplete captures
 
-Status: proposed 2026-10-28, not implemented. Source: `docs/FIELD-LEARNINGS.md`, "main checkout" entries of 2026-10-27.
+Status: implemented 2026-10-28 (see the implementation note below). Source: `docs/FIELD-LEARNINGS.md`, "main checkout" entries of 2026-10-27.
 
 ## Problem
 
@@ -23,3 +23,11 @@ Four refused captures of one large worktree (each refusal correct: nested reposi
 ## Acceptance
 
 The three gates pass; on the field case, `timber gc --dry-run` reports the four incomplete markers and about 19 GB reclaimable, and `timber gc` reclaims them while the three verified checkpoints still verify.
+
+## Implementation note (2026-10-28)
+
+- **Journal.** The incomplete marker keeps its pretty-printed JSON header, now with `"journal": 1`, and each object the run adds is appended as one JSON line (`{"object": <id>, "bytes": <n>}`) and synced as the run proceeds. An object counts as added only when that run's write created it, so pre-existing shared objects are never claimed. A header without `journal` is an earlier version's marker and is reported as `journal absent`; a malformed tail is reported as `truncated` and the entries before it still count.
+- **Reachability governs deletion.** `gc` removes every object no completed manifest references, whether or not a journal lists it (an unreferenced object no journal names is reported as unattributed). Journals attribute bytes to runs; they never authorize deleting a referenced object.
+- **Order and integrity.** `gc` refuses before deleting anything when a completed manifest references an absent object, naming the checkpoint. The check is presence as a regular file; `timber verify` remains the content check. Deletion removes objects first and markers last, so an interrupted `gc` still leaves the markers for the next dry run, and it confirms afterwards that every completed checkpoint still has its objects. Leftover temporary files in `objects/` and bundle staging directories in `incomplete/` are reclaimed too; unrecognized items are kept and listed.
+- **Concurrency.** A capture holds a shared advisory lock on the store root for its whole run and an exclusive lock on its own marker; `gc` takes the store lock exclusively and refuses while any capture holds it, and a capture refuses while `gc` runs. `gc --dry-run` takes no store lock and reports a locked marker as in progress. Lock attempts wait up to about one second before refusing.
+- **Acceptance.** The three gates pass on synthetic fixtures (`tests/reclaim.rs`). The field case (four markers, about 19 GB) is not measured here.

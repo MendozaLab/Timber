@@ -137,6 +137,19 @@ A successful result covers the supported state in that checkpoint. Excluded file
 
 `restore-git` requires the group to have been captured through `--dependency-repo`. Supported stash dependencies reconstruct their base, staged and working layers; a supported untracked parent is restored separately into that working copy. Ordinary pinned commits restore their recorded tree. Folder files and Git-backed state are separate recovery components, and neither proves that every file from a former checkout has been recovered.
 
+### Reclaim space from refused captures
+
+A refused or interrupted capture keeps its incomplete marker and the objects it already wrote; Timber never deletes them on its own. The refusal names the marker, the bytes the run added, and the review command:
+
+```sh
+timber --store ./timber-store gc --dry-run
+timber --store ./timber-store gc
+```
+
+`gc --dry-run` writes nothing. It lists every incomplete marker in `incomplete/` with its id, age, operation, whether a capture still holds it, and its journal: the objects that run added to the store (objects that already existed are not counted as its own). It then reports every object that no completed checkpoint references, the bytes `gc` would reclaim, and what it keeps. A marker written by an earlier Timber has no journal and is reported as `journal absent`; that changes attribution only.
+
+`gc` first checks that every object each completed manifest references is present; if one is missing it refuses before removing anything and names the checkpoint, so run `timber verify` on it and keep the store as it is. Otherwise it removes the incomplete markers, the objects no completed manifest references, and leftover temporary items from interrupted writes, then prints what it removed and what it kept, with bytes. Reachability decides every deletion: an object a completed checkpoint references is kept even when a journal lists it. Completed checkpoints are never removed. `gc` takes no source path, works only inside the store, and refuses while a capture is running in the same store (a capture likewise refuses while `gc` runs). Items Timber does not recognize are reported and kept.
+
 ## 4. Choose a target and sources
 
 Checkpoint the target too, including any unfinished target changes. Then prepare an ordered plan:
