@@ -46,7 +46,12 @@ fn nul_strings(bytes: &[u8]) -> Result<Vec<String>> {
         .collect()
 }
 
-/// Checks supported Git states and returns logical stage-zero index entries.
+/// Index mode of a gitlink (a submodule pointer).
+pub const GITLINK_MODE: &str = "160000";
+
+/// Checks supported Git states and returns logical stage-zero index entries,
+/// including gitlinks (mode 160000). Readability of each gitlink's submodule
+/// directory is checked separately by [`submodule_records`].
 pub fn read_index(path: &Path) -> Result<Vec<(String, String, String)>> {
     let raw = git::run(path, &["ls-files", "--stage", "-z"])?;
     let mut entries = Vec::new();
@@ -62,8 +67,8 @@ pub fn read_index(path: &Path) -> Result<Vec<(String, String, String)>> {
             "unresolved index stages are unsupported"
         );
         ensure!(
-            ["100644", "100755", "120000"].contains(&fields[0]),
-            "unsupported index mode (including submodules): {}",
+            ["100644", "100755", "120000", GITLINK_MODE].contains(&fields[0]),
+            "unsupported index mode: {}",
             fields[0]
         );
         ensure!(
@@ -110,6 +115,82 @@ pub fn read_index(path: &Path) -> Result<Vec<(String, String, String)>> {
     }
     entries.sort();
     Ok(entries)
+}
+
+/// Records one gitlink without reading the submodule's files. The submodule path
+/// must be a real directory that is either empty (not initialized; only the index
+/// commit id is recorded) or holds a `.git` whose HEAD resolves inside that same
+/// directory. Anything else is refused, naming the path: a missing path, a file or
+/// symbolic link, a non-empty directory without `.git`, or an unreadable HEAD.
+pub fn submodule_record(source: &Path, path: &str, gitlink: &str) -> Result<SubmoduleRecord> {
+    fsx::validate_relative(path)?;
+    ensure!(
+        valid_oid(gitlink),
+        "submodule gitlink commit id cannot be read: {path}"
+    );
+    let directory = source.join(path);
+    let metadata = fs::symlink_metadata(&directory).with_context(|| {
+        format!("submodule is not initialized or not readable (path missing): {path}")
+    })?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink() && !fsx::is_placeholder(&metadata),
+        "submodule path is not a real directory: {path}"
+    );
+    let dot_git = directory.join(".git");
+    let initialized = match fs::symlink_metadata(&dot_git) {
+        Ok(_) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(e) => {
+            return Err(e).with_context(|| format!("submodule metadata unreadable: {path}"));
+        }
+    };
+    if !initialized {
+        // Read at most one name: emptiness is all that is needed, and nothing is opened.
+        let empty = fs::read_dir(&directory)
+            .with_context(|| format!("submodule directory unreadable: {path}"))?
+            .next()
+            .is_none();
+        ensure!(
+            empty,
+            "submodule is not initialized but its directory is not empty: {path}; its files cannot be recorded as a pointer"
+        );
+        return Ok(SubmoduleRecord {
+            path: path.to_owned(),
+            gitlink_commit: gitlink.to_owned(),
+            checked_out_commit: None,
+        });
+    }
+    let unreadable =
+        |error: anyhow::Error| error.context(format!("submodule HEAD is not readable: {path}"));
+    let toplevel = git::text(&directory, &["rev-parse", "--show-toplevel"]).map_err(unreadable)?;
+    // An invalid `.git` directory lets Git walk up to the superproject; refuse that.
+    ensure!(
+        Path::new(&toplevel).canonicalize().ok() == directory.canonicalize().ok(),
+        "submodule HEAD is not readable: {path}; Git resolved its repository elsewhere"
+    );
+    let head =
+        git::text(&directory, &["rev-parse", "--verify", "HEAD^{commit}"]).map_err(unreadable)?;
+    ensure!(
+        valid_oid(&head),
+        "submodule HEAD is not readable: {path}; unsupported commit identity"
+    );
+    Ok(SubmoduleRecord {
+        path: path.to_owned(),
+        gitlink_commit: gitlink.to_owned(),
+        checked_out_commit: Some(head),
+    })
+}
+
+/// Records every gitlink in the given index, refusing an unreadable one by path.
+pub fn submodule_records(
+    source: &Path,
+    index: &[(String, String, String)],
+) -> Result<Vec<SubmoduleRecord>> {
+    index
+        .iter()
+        .filter(|(_, mode, _)| mode == GITLINK_MODE)
+        .map(|(path, _, oid)| submodule_record(source, path, oid))
+        .collect()
 }
 
 pub fn validate_worktree(path: &Path) -> Result<()> {
@@ -168,7 +249,8 @@ pub fn validate_worktree(path: &Path) -> Result<()> {
             "unsupported or active Git operation: {name}"
         );
     }
-    read_index(path)?;
+    let index = read_index(path)?;
+    submodule_records(path, &index)?;
     Ok(())
 }
 
@@ -323,7 +405,7 @@ fn operator_exclusions(
 
 fn persist_entries(store: &Store, source: &Path, entries: &[Entry]) -> Result<()> {
     for entry in entries {
-        if entry.kind != EntryKind::Directory {
+        if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
             let bytes = fsx::read_entry(source, entry)?;
             ensure!(
                 bytes.len() as u64 == entry.size && fsx::digest(&bytes) == entry.sha256,
@@ -381,6 +463,28 @@ pub fn checkpoint_with_exclusions(
         selectors.push(selector);
     }
     let marker = started(store, &source, "checkpoint")?;
+    // Gitlinks are recorded as pointers: their directories are pruned from the file
+    // walk so a submodule's `.git` and files are never read.
+    let index_before = read_index(&source)?;
+    let submodules = submodule_records(&source, &index_before)?;
+    let gitlinks = submodules
+        .iter()
+        .map(|s| s.path.clone())
+        .collect::<BTreeSet<_>>();
+    let scan = |include: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
+        let mut entries =
+            fsx::inventory_pruned(&source, |p| gitlinks.contains(p) || prune(p), include)?;
+        entries.extend(submodules.iter().map(|s| Entry {
+            path: s.path.clone(),
+            kind: EntryKind::Submodule,
+            mode: 0,
+            size: 0,
+            sha256: String::new(),
+        }));
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        fsx::validate_entries(&entries)?;
+        Ok(entries)
+    };
     let ignored = ignored_paths(&source)?;
     for selector in &selectors {
         ensure!(
@@ -391,7 +495,7 @@ pub fn checkpoint_with_exclusions(
         );
     }
     let exclude = |p: &str| ignored.contains(p) && !included(p, &selectors);
-    let entries = fsx::inventory_pruned(&source, prune, |p| !exclude(p))?;
+    let entries = scan(&|p| !exclude(p))?;
     for selector in &operator {
         ensure!(
             pruned.borrow().contains(selector),
@@ -400,9 +504,9 @@ pub fn checkpoint_with_exclusions(
     }
     let head = git::text(&source, &["rev-parse", "--verify", "HEAD"])?;
     let branch = git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok();
-    let index_before = read_index(&source)?;
     let object_ids = index_before
         .iter()
+        .filter(|(_, mode, _)| mode != GITLINK_MODE)
         .map(|(_, _, oid)| oid.clone())
         .collect::<Vec<_>>();
     let mut staged_objects = BTreeMap::new();
@@ -411,7 +515,7 @@ pub fn checkpoint_with_exclusions(
         Ok(())
     })?;
     let mut index = Vec::new();
-    for (path, mode, oid) in &index_before {
+    for (path, mode, oid) in index_before.iter().filter(|(_, m, _)| m != GITLINK_MODE) {
         index.push(IndexEntry {
             path: path.clone(),
             mode: mode.clone(),
@@ -431,13 +535,24 @@ pub fn checkpoint_with_exclusions(
     git::run(&source, &["bundle", "create", bundle_str, "HEAD"])?;
     let bundle = store.put(&fs::read(&bundle_path)?)?;
     ensure!(
-        entries == fsx::inventory_pruned(&source, prune, |p| !exclude(p))?,
+        entries == scan(&|p| !exclude(p))?,
         "working files changed during capture; checkpoint remains incomplete"
     );
     ensure!(
         index_before == read_index(&source)?,
         "index changed during capture"
     );
+    let submodules_after = submodule_records(&source, &index_before)?;
+    if let Some(changed) = submodules
+        .iter()
+        .zip(&submodules_after)
+        .find(|(a, b)| a != b)
+    {
+        bail!(
+            "submodule checkout changed during capture: {}",
+            changed.0.path
+        );
+    }
     ensure!(
         head == git::text(&source, &["rev-parse", "--verify", "HEAD"])?
             && branch == git::text(&source, &["symbolic-ref", "-q", "HEAD"]).ok(),
@@ -497,6 +612,7 @@ pub fn checkpoint_with_exclusions(
             index,
             bundle,
             protected_roots,
+            submodules,
         }),
         excluded,
         capture: CaptureConditions {

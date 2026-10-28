@@ -63,7 +63,7 @@ pub fn validate_entries(entries: &[Entry]) -> Result<()> {
             e.path
         );
         ensure!(e.mode <= 0o777, "invalid file permissions");
-        if e.kind != EntryKind::Directory {
+        if matches!(e.kind, EntryKind::File | EntryKind::Symlink) {
             ensure!(
                 e.sha256.len() == 64 && e.sha256.bytes().all(|b| b.is_ascii_hexdigit()),
                 "invalid content digest"
@@ -107,6 +107,7 @@ pub fn read_entry(root: &Path, entry: &Entry) -> Result<Vec<u8>> {
     );
     let bytes = match entry.kind {
         EntryKind::Directory => Vec::new(),
+        EntryKind::Submodule => bail!("submodule contents are never read: {:?}", entry.path),
         EntryKind::Symlink => {
             ensure!(meta.file_type().is_symlink(), "source type changed");
             let (parent, name) = parent_fd(root, &entry.path)?;
@@ -485,7 +486,8 @@ pub fn materialize(
         {
             dirs.insert(p.to_str().context("invalid path")?.to_owned());
         }
-        if e.kind == EntryKind::Directory {
+        // A recorded submodule is reproduced as an empty directory, never populated.
+        if matches!(e.kind, EntryKind::Directory | EntryKind::Submodule) {
             dirs.insert(e.path.clone());
         }
     }
@@ -503,7 +505,10 @@ pub fn materialize(
             let _ = confined_directory_fd(root, dir)?;
         }
     }
-    for entry in entries.iter().filter(|e| e.kind != EntryKind::Directory) {
+    for entry in entries
+        .iter()
+        .filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Symlink))
+    {
         let bytes = read(&entry.sha256)?;
         ensure!(
             digest(&bytes) == entry.sha256 && bytes.len() as u64 == entry.size,
@@ -542,7 +547,7 @@ pub fn materialize(
                         .context("create extracted symlink");
                 }
             }
-            EntryKind::Directory => {}
+            EntryKind::Directory | EntryKind::Submodule => {}
         }
     }
     for dir in dirs.iter().rev() {

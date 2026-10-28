@@ -198,7 +198,7 @@ impl Store {
             "manifest digest does not match identity"
         );
         for entry in &manifest.entries {
-            if entry.kind != EntryKind::Directory {
+            if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
                 self.get(&entry.sha256)?;
             }
         }
@@ -244,10 +244,22 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
         "source root must be normalized"
     );
     fsx::validate_entries(&manifest.entries)?;
+    let mut submodule_paths = std::collections::BTreeSet::new();
     for entry in &manifest.entries {
         ensure!(entry.mode <= 0o777, "unsupported permission bits");
-        if entry.kind != EntryKind::Directory {
-            ensure!(valid_digest(&entry.sha256), "invalid entry digest");
+        match entry.kind {
+            EntryKind::File | EntryKind::Symlink => {
+                ensure!(valid_digest(&entry.sha256), "invalid entry digest")
+            }
+            EntryKind::Submodule => {
+                ensure!(
+                    entry.sha256.is_empty() && entry.size == 0 && entry.mode == 0,
+                    "submodule entry carries content: {}",
+                    entry.path
+                );
+                submodule_paths.insert(entry.path.as_str());
+            }
+            EntryKind::Directory => {}
         }
     }
     for exclusion in &manifest.excluded {
@@ -312,8 +324,40 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<()> {
             });
         }
         fsx::validate_entries(&logical_files)?;
+        let mut recorded = std::collections::BTreeSet::new();
+        for submodule in &git.submodules {
+            fsx::validate_relative(&submodule.path)?;
+            ensure!(
+                recorded.insert(submodule.path.as_str()),
+                "duplicate submodule record: {}",
+                submodule.path
+            );
+            ensure!(
+                !paths.contains(&submodule.path),
+                "submodule path is also an index file: {}",
+                submodule.path
+            );
+            ensure!(
+                valid_oid(&submodule.gitlink_commit)
+                    && submodule
+                        .checked_out_commit
+                        .as_deref()
+                        .is_none_or(valid_oid),
+                "invalid submodule commit identity: {}",
+                submodule.path
+            );
+        }
+        ensure!(
+            recorded == submodule_paths,
+            "submodule records and submodule entries differ"
+        );
     } else if manifest.source_kind == "worktree" {
         bail!("worktree checkpoint lacks Git state");
+    } else {
+        ensure!(
+            submodule_paths.is_empty(),
+            "folder imports cannot record submodules"
+        );
     }
     if let Some(map) = &manifest.import_map {
         validate_import_map(map)?;

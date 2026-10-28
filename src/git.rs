@@ -6,8 +6,40 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use wait_timeout::ChildExt;
+
+/// Default limit, in seconds, for each single Git operation (`--git-timeout`).
+pub const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+static TIMEOUT_SECONDS: AtomicU64 = AtomicU64::new(DEFAULT_TIMEOUT_SECONDS);
+
+/// Set the limit that applies to each single Git operation from now on. Values
+/// below one second are raised to one second.
+pub fn set_timeout_seconds(seconds: u64) {
+    TIMEOUT_SECONDS.store(seconds.max(1), Ordering::Relaxed);
+}
+/// The limit, in seconds, that applies to each single Git operation.
+pub fn timeout_seconds() -> u64 {
+    TIMEOUT_SECONDS.load(Ordering::Relaxed)
+}
+
+/// Names a Git operation for a timeout message: the subcommand and its first
+/// options, without paths or object identities.
+fn operation_name(args: &[&str]) -> String {
+    args.iter()
+        .take(4)
+        .filter(|a| !a.contains('/') && a.len() < 40)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+fn timeout_message(args: &[&str], seconds: u64) -> String {
+    format!(
+        "Git operation `{}` exceeded the {seconds}-second limit (--git-timeout {seconds}); source was not changed",
+        operation_name(args)
+    )
+}
 
 fn configured_command(repo: &Path, args: &[&str]) -> Command {
     let mut command = Command::new("git");
@@ -72,7 +104,8 @@ pub fn output(repo: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output
         let mut b = Vec::new();
         stderr.read_to_end(&mut b).map(|_| b)
     });
-    let status = child.wait_timeout(Duration::from_secs(120))?;
+    let limit = timeout_seconds();
+    let status = child.wait_timeout(Duration::from_secs(limit))?;
     let timed_out = status.is_none();
     if timed_out {
         // SAFETY: a new process group was created for this owned child. Negative
@@ -92,7 +125,7 @@ pub fn output(repo: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Output
         .join()
         .map_err(|_| anyhow::anyhow!("Git input writer failed"))?;
     if timed_out {
-        bail!("Git operation exceeded 120 seconds; source was not changed");
+        bail!("{}", timeout_message(args, limit));
     }
     if status.success() {
         write_result.context("writing Git input")?;
@@ -222,7 +255,8 @@ pub fn batch_blob_fingerprints(
         }
         Ok(result)
     });
-    let status = child.wait_timeout(Duration::from_secs(120))?;
+    let limit = timeout_seconds();
+    let status = child.wait_timeout(Duration::from_secs(limit))?;
     let timed_out = status.is_none();
     if timed_out {
         // SAFETY: this invocation owns its new process group and Git children.
@@ -243,7 +277,11 @@ pub fn batch_blob_fingerprints(
     let written = writer
         .join()
         .map_err(|_| anyhow::anyhow!("Git batch writer failed"))?;
-    ensure!(!timed_out, "Git batch exceeded 120 seconds");
+    ensure!(
+        !timed_out,
+        "{}",
+        timeout_message(&["cat-file", "--batch"], limit)
+    );
     ensure!(
         status.success(),
         "Git batch failed: {}",
@@ -302,7 +340,8 @@ where
             }
             Ok(())
         });
-        let status = child.wait_timeout(Duration::from_secs(120))?;
+        let limit = timeout_seconds();
+        let status = child.wait_timeout(Duration::from_secs(limit))?;
         let timed_out = status.is_none();
         if timed_out {
             // SAFETY: this invocation owns the new Git process group.
@@ -323,7 +362,11 @@ where
         let written = writer
             .join()
             .map_err(|_| anyhow::anyhow!("Git batch writer failed"))?;
-        ensure!(!timed_out, "Git batch exceeded 120 seconds");
+        ensure!(
+            !timed_out,
+            "{}",
+            timeout_message(&["cat-file", "--batch"], limit)
+        );
         ensure!(
             status.success(),
             "Git batch failed: {}",

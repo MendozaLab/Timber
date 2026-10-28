@@ -142,10 +142,27 @@ pub fn worktree(path: &Path) -> Result<Value> {
     // not filenames, are sent to Git, so embedded tabs/newlines remain harmless.
     let fingerprints = git::batch_blob_fingerprints(path, &requested)?;
     let mut compared = 0usize;
+    let mut submodules = Vec::new();
     for (name, (mode, oid)) in &index {
-        if mode == "160000" {
-            blockers.push(format!("submodule unsupported: {name}").into());
-            unknown.push(name.clone());
+        if mode == crate::capture::GITLINK_MODE {
+            // A submodule is recorded by checkpoint as a pointer; its files are never
+            // read. Only an unreadable gitlink remains a blocker.
+            match crate::capture::submodule_record(path, name, oid) {
+                Ok(record) => {
+                    if record
+                        .checked_out_commit
+                        .as_ref()
+                        .is_some_and(|head| head != oid)
+                    {
+                        working.push(name.clone());
+                    }
+                    submodules.push(record);
+                }
+                Err(error) => {
+                    blockers.push(format!("submodule unreadable: {name}: {error:#}").into());
+                    unknown.push(name.clone());
+                }
+            }
             continue;
         }
         let metadata = match fs::symlink_metadata(path.join(name)) {
@@ -230,7 +247,12 @@ pub fn worktree(path: &Path) -> Result<Value> {
     if !unknown_metadata.is_empty() {
         blockers.push("Some untracked/ignored metadata became unavailable during inspection; those entries remain unknown.".into());
     }
-    let nested_scan_complete = match nested_repository_blocker(path, &index, &base) {
+    let gitlinks: BTreeSet<_> = index
+        .iter()
+        .filter(|(_, (mode, _))| mode == crate::capture::GITLINK_MODE)
+        .map(|(p, _)| p.as_str())
+        .collect();
+    let nested_scan_complete = match nested_repository_blocker(path, &index, &base, &gitlinks) {
         Ok(Some(blocker)) => {
             blockers.push(blocker);
             true
@@ -256,7 +278,7 @@ pub fn worktree(path: &Path) -> Result<Value> {
         "path":path,"kind":"registered_worktree","inspection_status":if unknown.is_empty() && unknown_metadata.is_empty() && git_identity_stable && nested_scan_complete {"scanned"}else{"partial"},
         "head":head,"staged_paths":staged,"working_paths":working,"unknown_working_paths":unknown,
         "untracked":untracked,"ignored":ignored,"unknown_metadata_paths":unknown_metadata,
-        "blockers":blockers,"git_identity_stable":git_identity_stable,"writer_exclusion_enforced":false,
+        "blockers":blockers,"submodules_recorded_not_captured":submodules,"git_identity_stable":git_identity_stable,"writer_exclusion_enforced":false,
         "statistics":{"index_paths":index.len(),"git_blob_objects_requested":requested.len(),"unique_index_blob_objects":unique_count,"cat_file_batch_processes":usize::from(!requested.is_empty()),"working_files_compared":compared,"elapsed_seconds":started.elapsed().as_secs_f64()},
         "note":"Working differences compare raw bytes without clean filters or index refresh. Per-file stable reads and unchanged HEAD/index do not establish a frozen snapshot or permission to clean up."
     }))
@@ -267,15 +289,22 @@ pub const NESTED_REPOSITORIES_MESSAGE: &str =
     "checkpoint will refuse this worktree until nested repositories are handled";
 
 /// Lists every nested repository below the worktree (a directory holding its own
-/// `.git` directory or file) without reading its contents, and classifies each path
+/// `.git` directory or file) other than a submodule at a gitlink path, without
+/// reading its contents, and classifies each path
 /// as tracked, ignored or untracked. Classification spends one Git process, and only
 /// when a nested repository exists.
 fn nested_repository_blocker(
     root: &Path,
     index: &BTreeMap<String, (String, String)>,
     base: &BTreeMap<String, (String, String)>,
+    gitlinks: &BTreeSet<&str>,
 ) -> Result<Option<Value>> {
-    let found = fsx::nested_repositories(root)?;
+    // A repository at a gitlink path is a submodule, recorded as a pointer by
+    // checkpoint; it is reported under `submodules_recorded_not_captured` instead.
+    let found = fsx::nested_repositories(root)?
+        .into_iter()
+        .filter(|r| !gitlinks.contains(r.as_str()))
+        .collect::<Vec<_>>();
     if found.is_empty() {
         return Ok(None);
     }

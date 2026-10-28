@@ -447,5 +447,5 @@ pub fn restore_dependency(store: &Store, id: &str, group: &str, to: &Path) -> Re
     verify(store, captured)?;
     fsx::fresh_dir(to)?;
     reconstruct(store, captured, to)?;
-    Ok(Verification {schema:SCHEMA,checkpoint:id.into(),manifest_sha256:fsx::digest(&serde_json::to_vec(&manifest)?),verifier_version:env!("CARGO_PKG_VERSION").into(),verified:true,historical_completeness:"captured_git_dependency_layers_only".into(),independent_backup:"unassessed".into(),excluded_by_operator:Vec::new(),notes:vec![format!("Recovered pinned Git dependency group {group:?} with independent base, staged and working layers."),"This does not establish former worktree completeness, application correctness, independent backup or cleanup authority.".into()]})
+    Ok(Verification {schema:SCHEMA,checkpoint:id.into(),manifest_sha256:fsx::digest(&serde_json::to_vec(&manifest)?),verifier_version:env!("CARGO_PKG_VERSION").into(),verified:true,historical_completeness:"captured_git_dependency_layers_only".into(),independent_backup:"unassessed".into(),excluded_by_operator:Vec::new(),submodules_recorded_not_captured:Vec::new(),notes:vec![format!("Recovered pinned Git dependency group {group:?} with independent base, staged and working layers."),"This does not establish former worktree completeness, application correctness, independent backup or cleanup authority.".into()]})
 }

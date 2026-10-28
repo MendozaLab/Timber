@@ -1,5 +1,5 @@
 //! Consolidation is performed only in a newly created independent repository.
-use crate::{fsx, git, model::*, restore, store::Store};
+use crate::{capture::GITLINK_MODE, fsx, git, model::*, restore, store::Store};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
@@ -61,13 +61,14 @@ pub(crate) fn tree_files(repo: &Path, revision: &str) -> Result<BTreeMap<String,
             .split_whitespace()
             .collect();
         ensure!(
-            fields.len() == 3 && fields[1] == "blob",
+            fields.len() == 3
+                && (fields[1] == "blob" || (fields[1] == "commit" && fields[0] == GITLINK_MODE)),
             "unsupported tree object"
         );
         let path = std::str::from_utf8(&record[tab + 1..])?.to_owned();
         fsx::validate_relative(&path)?;
         ensure!(
-            matches!(fields[0], "100644" | "100755" | "120000"),
+            matches!(fields[0], "100644" | "100755" | "120000" | GITLINK_MODE),
             "unsupported tree mode"
         );
         ensure!(
@@ -94,6 +95,8 @@ fn validate_tree_paths(files: &BTreeMap<String, TreeFile>) -> Result<()> {
             path: path.clone(),
             kind: if file.mode == "120000" {
                 EntryKind::Symlink
+            } else if file.mode == GITLINK_MODE {
+                EntryKind::Submodule
             } else {
                 EntryKind::File
             },
@@ -138,8 +141,9 @@ pub(crate) fn validate_selection(manifest: &Manifest, selection: &Selection) -> 
 
 fn write_blob(store: &Store, repo: &Path, entry: &Entry) -> Result<TreeFile> {
     ensure!(
-        entry.kind != EntryKind::Directory,
-        "cannot add directory as a file"
+        matches!(entry.kind, EntryKind::File | EntryKind::Symlink),
+        "cannot add directory or submodule as a file: {}",
+        entry.path
     );
     let bytes = store.get(&entry.sha256)?;
     let oid = String::from_utf8(git::run_input(
@@ -195,10 +199,33 @@ pub(crate) fn selected_files(
                 },
             );
         }
+        for submodule in &state.submodules {
+            files.insert(
+                submodule.path.clone(),
+                TreeFile {
+                    mode: GITLINK_MODE.into(),
+                    oid: submodule.gitlink_commit.clone(),
+                },
+            );
+        }
     } else {
+        // The working layer of a submodule is the commit its checkout pointed at, as
+        // Git would record it; an uninitialized submodule keeps its index pointer.
+        for submodule in &state.submodules {
+            files.insert(
+                submodule.path.clone(),
+                TreeFile {
+                    mode: GITLINK_MODE.into(),
+                    oid: submodule
+                        .checked_out_commit
+                        .clone()
+                        .unwrap_or_else(|| submodule.gitlink_commit.clone()),
+                },
+            );
+        }
         let tracked: BTreeSet<_> = state.index.iter().map(|e| e.path.as_str()).collect();
         for entry in &manifest.entries {
-            if entry.kind == EntryKind::Directory {
+            if matches!(entry.kind, EntryKind::Directory | EntryKind::Submodule) {
                 continue;
             }
             let selected_extra = selection
@@ -302,8 +329,6 @@ fn materialize_head(repo: &Path, revision: &str) -> Result<()> {
     let mut contents = BTreeMap::new();
     let mut dirs = BTreeSet::new();
     for (path, file) in files {
-        let bytes = git::run(repo, &["cat-file", "blob", &file.oid])?;
-        let digest = fsx::digest(&bytes);
         let mut parent = Path::new(&path).parent();
         while let Some(p) = parent {
             if p.as_os_str().is_empty() {
@@ -312,6 +337,19 @@ fn materialize_head(repo: &Path, revision: &str) -> Result<()> {
             dirs.insert(p.to_str().context("invalid parent path")?.to_owned());
             parent = p.parent();
         }
+        if file.mode == GITLINK_MODE {
+            // A pointer only: the preview shows an empty directory, never contents.
+            entries.push(Entry {
+                path,
+                kind: EntryKind::Submodule,
+                mode: 0,
+                size: 0,
+                sha256: String::new(),
+            });
+            continue;
+        }
+        let bytes = git::run(repo, &["cat-file", "blob", &file.oid])?;
+        let digest = fsx::digest(&bytes);
         entries.push(Entry {
             path,
             kind: if file.mode == "120000" {
@@ -368,7 +406,10 @@ fn folder_files(
             let entry = manifest
                 .entries
                 .iter()
-                .find(|e| e.path == mapping.stored_path && e.kind != EntryKind::Directory)
+                .find(|e| {
+                    e.path == mapping.stored_path
+                        && matches!(e.kind, EntryKind::File | EntryKind::Symlink)
+                })
                 .context("mapped source file not captured")?;
             files.push((
                 entry.clone(),
@@ -378,7 +419,7 @@ fn folder_files(
         }
     }
     for entry in &manifest.entries {
-        if entry.kind != EntryKind::Directory
+        if matches!(entry.kind, EntryKind::File | EntryKind::Symlink)
             && selection
                 .extra_paths
                 .iter()
@@ -396,6 +437,52 @@ fn folder_files(
         "folder import has no selected files: supply an import map or explicit extra_paths in the plan"
     );
     Ok(files)
+}
+
+/// Three-way check of submodule pointers before any merge. A path whose gitlink
+/// changed on both sides to different commits is a conflict reported by path;
+/// Git is never asked to merge submodule contents.
+fn gitlink_conflicts(
+    repo: &Path,
+    current: &str,
+    candidate: &str,
+    checkpoint: &str,
+) -> Result<Vec<Value>> {
+    let ours = tree_files(repo, current)?;
+    let theirs = tree_files(repo, candidate)?;
+    let is_gitlink = |file: Option<&TreeFile>| file.is_some_and(|f| f.mode == GITLINK_MODE);
+    let paths: BTreeSet<_> = ours
+        .iter()
+        .chain(theirs.iter())
+        .filter(|(_, f)| f.mode == GITLINK_MODE)
+        .map(|(p, _)| p.clone())
+        .collect();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let merge_base = git::output(repo, &["merge-base", current, candidate], None)?;
+    ensure!(
+        matches!(merge_base.status.code(), Some(0 | 1)),
+        "could not determine preview merge base"
+    );
+    let base = if merge_base.status.success() {
+        tree_files(repo, std::str::from_utf8(&merge_base.stdout)?.trim())?
+    } else {
+        BTreeMap::new()
+    };
+    let oid = |file: Option<&TreeFile>| file.map(|f| f.oid.clone());
+    let mut conflicts = Vec::new();
+    for path in paths {
+        let (o, t, b) = (ours.get(&path), theirs.get(&path), base.get(&path));
+        if o != t && o != b && t != b && (is_gitlink(o) || is_gitlink(t)) {
+            conflicts.push(json!({
+                "kind":"submodule_gitlink","path":path,
+                "preview_commit":oid(o),"source_commit":oid(t),"base_commit":oid(b),"checkpoint":checkpoint,
+                "message":format!("Submodule {path}: different at the same path; the gitlink changed on both sides. Only recorded pointers are compared; submodule contents were not captured or merged.")
+            }));
+        }
+    }
+    Ok(conflicts)
 }
 
 fn parse_conflict_records(bytes: &[u8]) -> Result<Vec<Value>> {
@@ -560,6 +647,13 @@ pub fn build(store: &Store, plan: &Plan, to: &Path) -> Result<PreviewResult> {
             )?
         };
         reject_unsafe_attributes(to, &current)?;
+        let gitlink_conflicts = gitlink_conflicts(to, &current, &candidate, &manifest.id)?;
+        if !gitlink_conflicts.is_empty() {
+            result.status = "conflicted".into();
+            result.conflict_records = gitlink_conflicts;
+            result.notes.push("A submodule pointer differs at the same path on both sides. Timber compares recorded gitlink commit ids only and never merges submodule contents; choose the pointer by hand.".into());
+            break;
+        }
         let output = git::output(
             to,
             &[

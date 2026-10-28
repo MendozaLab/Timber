@@ -1,8 +1,8 @@
 //! Independent reconstruction; no checkout, hooks, filters or original object store.
 use crate::{
-    capture::read_index,
+    capture::{GITLINK_MODE, read_index},
     fsx, git,
-    model::{EXCLUDED_BY_OPERATOR, Manifest, SCHEMA, Verification},
+    model::{EXCLUDED_BY_OPERATOR, EntryKind, Manifest, SCHEMA, Verification},
     store::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -24,7 +24,7 @@ pub fn restore(store: &Store, id: &str, to: &Path) -> Result<Verification> {
     fsx::ensure_outside(to, &store.root)?;
     // Validate all bytes and every path before creating a destination.
     for entry in &manifest.entries {
-        if entry.kind != crate::model::EntryKind::Directory {
+        if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
             let content = store.get(&entry.sha256)?;
             ensure!(
                 content.len() as u64 == entry.size,
@@ -105,6 +105,16 @@ fn reconstruct(store: &Store, manifest: &Manifest, to: &Path) -> Result<()> {
                 format!("{} {} 0\t{}\0", entry.mode, entry.oid, entry.path).as_bytes(),
             );
         }
+        // A gitlink needs no object: the pointer is restored, never the submodule.
+        for submodule in &state.submodules {
+            index_info.extend_from_slice(
+                format!(
+                    "{GITLINK_MODE} {} 0\t{}\0",
+                    submodule.gitlink_commit, submodule.path
+                )
+                .as_bytes(),
+            );
+        }
         git::run_input(to, &["update-index", "-z", "--index-info"], &index_info)?;
         git::run(to, &["fsck", "--full", "--no-reflogs"])?;
     }
@@ -148,7 +158,23 @@ fn existing_blobs(repo: &Path, object_ids: &BTreeSet<String>) -> Result<BTreeSet
 }
 
 fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verification> {
-    let actual = fsx::inventory(to)?;
+    let mut actual = fsx::inventory(to)?;
+    // Each recorded submodule must come back as an empty directory; any file below it
+    // would appear as an extra entry and fail the comparison.
+    for entry in &mut actual {
+        if let Some(recorded) = manifest
+            .entries
+            .iter()
+            .find(|e| e.kind == EntryKind::Submodule && e.path == entry.path)
+        {
+            ensure!(
+                entry.kind == EntryKind::Directory,
+                "restored submodule path is not a directory: {}",
+                entry.path
+            );
+            *entry = recorded.clone();
+        }
+    }
     ensure!(
         actual == manifest.entries,
         "restored paths, bytes, symlinks or modes differ from checkpoint"
@@ -158,11 +184,19 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
             git::text(to, &["rev-parse", "--verify", "HEAD"])? == state.head,
             "restored HEAD differs"
         );
-        let wanted: Vec<_> = state
+        let mut wanted: Vec<_> = state
             .index
             .iter()
             .map(|e| (e.path.clone(), e.mode.clone(), e.oid.clone()))
+            .chain(state.submodules.iter().map(|s| {
+                (
+                    s.path.clone(),
+                    GITLINK_MODE.to_owned(),
+                    s.gitlink_commit.clone(),
+                )
+            }))
             .collect();
+        wanted.sort();
         ensure!(read_index(to)? == wanted, "restored logical index differs");
         let object_ids = state
             .index
@@ -191,6 +225,28 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
             "{} excluded paths remain outside this recovery claim.",
             manifest.excluded.len()
         ));
+    }
+    let submodules = manifest
+        .git
+        .as_ref()
+        .map(|state| state.submodules.clone())
+        .unwrap_or_default();
+    if !submodules.is_empty() {
+        notes.push(format!(
+            "{} submodules are recorded as pointers only; their contents were not captured. Each path is restored as an empty directory with its gitlink in the index; nothing was fetched or initialized. See submodules_recorded_not_captured.",
+            submodules.len()
+        ));
+        for submodule in &submodules {
+            notes.push(format!(
+                "Submodule {}: gitlink commit {}; checked-out commit {}; contents not captured.",
+                submodule.path,
+                submodule.gitlink_commit,
+                submodule
+                    .checked_out_commit
+                    .as_deref()
+                    .unwrap_or("none (not initialized at capture)")
+            ));
+        }
     }
     let excluded_by_operator = manifest
         .excluded
@@ -230,6 +286,7 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
         .into(),
         independent_backup: "unassessed".into(),
         excluded_by_operator,
+        submodules_recorded_not_captured: submodules,
         notes,
     })
 }

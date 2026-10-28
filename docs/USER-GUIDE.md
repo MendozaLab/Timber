@@ -12,6 +12,8 @@ The preservation and preview examples below consistently use `--store ./timber-s
 
 Restoration and preview destinations must be new directories. Timber refuses existing destinations and paths nested inside captured sources.
 
+`--git-timeout SECONDS` sets the limit for each single Git operation (default 120, from 1 to 86400) for one run. Raise it for a known-large repository, for example `timber --git-timeout 600 inspect --repo ./project`. A timeout never changes the source: inspection reports the worktree as partial and checkpoint refuses, and the message names the Git operation and the limit that applied.
+
 ## 1. Inspect the relevant project
 
 ```sh
@@ -68,6 +70,8 @@ timber --store ./timber-store checkpoint ./agent-navigation --exclude test-outpu
 ```
 
 `--exclude` is repeatable and takes paths relative to the worktree. Timber skips each path and everything below it, and records it in the manifest as `excluded_by_operator`; `verify` and `restore` print the excluded paths, so a partial capture cannot pass for a complete one. Only untracked or ignored paths can be excluded: Timber refuses, naming the path, an exclusion that covers a tracked path (whether or not it has staged or working changes), matches nothing, passes through a symbolic link, or overlaps another exclusion or an `--include-ignored` selection. The decision is yours and lasts for one run; Timber never remembers an exclusion or guesses that something is disposable. Inspection takes no `--exclude` and keeps reporting the nested repository.
+
+Submodule contents are never captured: a submodule is recorded as a pointer (its path, the gitlink commit id in the index, and the commit its checkout points at), `restore` recreates its path as an empty directory without fetching or initializing it, and plans compare the pointers by commit id only. An empty, uninitialized submodule directory records the index id alone. Timber refuses, naming the path, a submodule whose directory is missing, holds files without a `.git`, or whose HEAD cannot be read. Capture and restore each submodule repository on its own if its contents matter.
 
 Pause your writers when possible. `--writers-paused` records your declaration; it does not enforce a lock against editors or agents. Matching capture scans establish observed stability, not proof that no concurrent write occurred.
 

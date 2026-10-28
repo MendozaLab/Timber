@@ -42,8 +42,8 @@ Unknown stays unknown. Timber supplies the evidence for the first three columns 
 | nested repository refused | a `.git` below the worktree | exclude a disposable folder for the run, or handle that repository separately |
 | --exclude refused for tracked path | the exclusion covers a file Git tracks | narrow the exclusion to the untracked or ignored folder |
 | source changed | something wrote into the worktree during capture | stop writers, rerun |
-| submodule unsupported | a gitlink in the index | not capturable today; see the submodules proposal |
-| Git operation exceeded N seconds | one Git call hit the time limit | result is partial; rerun later or on a smaller scope |
+| submodule unreadable | a gitlink whose path is missing, holds files without a `.git`, or whose HEAD cannot be read | initialize or repair that submodule, or handle it separately; readable submodules are recorded as pointers and their contents are never captured |
+| Git operation `...` exceeded the N-second limit | one Git call hit the time limit, named in the message | result is partial and the source unchanged; rerun with a larger `--git-timeout <seconds>` (default 120) or on a smaller scope |
 | Worktree directory is absent | registration with no folder | check for an unmounted volume before any prune |
 
 A clean preview is a mechanical merge. It is never permission to discard the originals; that decision stays with a person, one worktree at a time.

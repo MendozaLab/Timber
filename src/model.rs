@@ -17,6 +17,10 @@ pub enum EntryKind {
     File,
     Symlink,
     Directory,
+    /// A gitlink (index mode 160000). The path is recorded with empty `sha256`, zero
+    /// `mode` and zero `size`; its commit ids live in [`GitState::submodules`]. The
+    /// submodule's files are never captured, and restore recreates an empty directory.
+    Submodule,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Entry {
@@ -33,14 +37,31 @@ pub struct IndexEntry {
     pub oid: String,
     pub blob: String,
 }
+/// One recorded submodule pointer. Contents are never captured.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubmoduleRecord {
+    pub path: String,
+    /// Commit id of the gitlink in the superproject index.
+    pub gitlink_commit: String,
+    /// Commit id the submodule's HEAD resolved to at capture, or `None` when the
+    /// submodule working directory was an empty, uninitialized directory.
+    pub checked_out_commit: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitState {
     pub head: String,
     pub branch: Option<String>,
     pub object_format: String,
+    /// Logical stage-zero index for regular files and symbolic links. Gitlinks are
+    /// recorded in `submodules` instead, because they have no captured blob.
     pub index: Vec<IndexEntry>,
     pub bundle: String,
     pub protected_roots: Vec<String>,
+    /// Gitlinks recorded as pointers, one per `EntryKind::Submodule` entry. Defaults to
+    /// empty and is omitted when empty, so manifests without submodules keep the same
+    /// bytes and identity as before this field existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submodules: Vec<SubmoduleRecord>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Exclusion {
@@ -175,5 +196,9 @@ pub struct Verification {
     /// Defaults to empty so verification records written before this field still load.
     #[serde(default)]
     pub excluded_by_operator: Vec<String>,
+    /// Submodule pointers recorded by the checkpoint. Their contents were not captured;
+    /// restore recreates each path as an empty directory. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submodules_recorded_not_captured: Vec<SubmoduleRecord>,
     pub notes: Vec<String>,
 }

@@ -1,5 +1,5 @@
 //! Plans bind source order and selected layers to immutable checkpoints.
-use crate::{fsx, git, model::*, preview, restore, store::Store};
+use crate::{capture::GITLINK_MODE, fsx, git, model::*, preview, restore, store::Store};
 use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use std::{
@@ -27,6 +27,53 @@ fn alternates(manifest: &Manifest) -> Vec<String> {
             })
         })
         .map(|i| i.path.clone())
+        .chain(
+            // An initialized submodule checked out at a commit other than its gitlink
+            // has a working pointer that differs from the staged one.
+            state
+                .submodules
+                .iter()
+                .filter(|s| {
+                    s.checked_out_commit
+                        .as_ref()
+                        .is_some_and(|head| *head != s.gitlink_commit)
+                })
+                .map(|s| s.path.clone()),
+        )
+        .collect()
+}
+
+/// Same-path comparison of submodule pointers as scalars: commit ids only, never a
+/// content diff. Returns one note per path whose gitlink differs.
+fn submodule_notes(
+    files: &BTreeMap<String, preview::TreeFile>,
+    target_files: &BTreeMap<String, preview::TreeFile>,
+) -> Vec<String> {
+    let gitlink = |file: Option<&preview::TreeFile>| {
+        file.filter(|f| f.mode == GITLINK_MODE)
+            .map(|f| f.oid.clone())
+    };
+    let paths: BTreeSet<_> = files
+        .iter()
+        .chain(target_files.iter())
+        .filter(|(_, f)| f.mode == GITLINK_MODE)
+        .map(|(p, _)| p)
+        .collect();
+    paths
+        .into_iter()
+        .filter(|p| files.get(*p) != target_files.get(*p))
+        .map(|path| {
+            let side = |file: Option<&preview::TreeFile>| match (file, gitlink(file)) {
+                (_, Some(oid)) => format!("gitlink {oid}"),
+                (Some(_), None) => "a file".to_owned(),
+                (None, _) => "nothing".to_owned(),
+            };
+            format!(
+                "Submodule {path}: different at the same path ({} in this checkpoint, {} in the target). Only the recorded pointers are compared; submodule contents were not captured.",
+                side(files.get(path)),
+                side(target_files.get(path))
+            )
+        })
         .collect()
 }
 
@@ -97,6 +144,7 @@ pub fn create(store: &Store, target: Selection, sources: Vec<Selection>) -> Resu
                 }
             }
             row.notes.push(format!("Selected {:?} layer. Matching file objects prove exact bytes and Git mode, not equivalent application behavior.", selection.layer));
+            row.notes.extend(submodule_notes(&files, &target_files));
             if !row.staged_alternates.is_empty() {
                 row.notes.push("Staged and working versions differ; only the selected layer enters the preview. Other versions remain in the checkpoint.".into());
             }
@@ -142,7 +190,7 @@ pub fn create(store: &Store, target: Selection, sources: Vec<Selection>) -> Resu
                 .entries
                 .iter()
                 .filter(|e| {
-                    e.kind != EntryKind::Directory
+                    matches!(e.kind, EntryKind::File | EntryKind::Symlink)
                         && !index_paths.contains(e.path.as_str())
                         && !selection
                             .extra_paths
@@ -152,6 +200,9 @@ pub fn create(store: &Store, target: Selection, sources: Vec<Selection>) -> Resu
                 .count();
             if omitted_extras > 0 {
                 row.notes.push(format!("{omitted_extras} captured untracked or ignored files are not selected for integration and remain only in the checkpoint."));
+            }
+            if !state.submodules.is_empty() {
+                row.notes.push(format!("{} submodules are recorded as pointers only; their contents were not captured.", state.submodules.len()));
             }
         }
         let empty_dirs = manifest
@@ -289,10 +340,15 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
                 blockers.push("ignored_path_coverage_changed_since_checkpoint".into());
             }
         }
+        let submodule_paths: BTreeSet<_> = manifest
+            .git
+            .iter()
+            .flat_map(|state| state.submodules.iter().map(|s| s.path.as_str()))
+            .collect();
         let observed = match &ignored {
             Ok(names) => fsx::inventory_pruned(
                 source,
-                |path| operator.contains(path),
+                |path| operator.contains(path) || submodule_paths.contains(path),
                 |path| {
                     !manifest
                         .excluded
@@ -316,7 +372,12 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
                 })
                 .cloned()
                 .collect();
-            let mut expected = manifest.entries.clone();
+            let mut expected: Vec<_> = manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind != EntryKind::Submodule)
+                .cloned()
+                .collect();
             filtered.sort_by(|a, b| a.path.cmp(&b.path));
             expected.sort_by(|a, b| a.path.cmp(&b.path));
             filtered == expected
@@ -343,10 +404,28 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
                 .index
                 .iter()
                 .map(|i| (i.path.clone(), i.mode.clone(), i.oid.clone()))
+                .chain(state.submodules.iter().map(|s| {
+                    (
+                        s.path.clone(),
+                        GITLINK_MODE.to_owned(),
+                        s.gitlink_commit.clone(),
+                    )
+                }))
                 .collect();
             expected.sort();
             if current_index(source).as_ref().ok() != Some(&expected) {
                 blockers.push("source_index_changed_or_unavailable".into());
+            }
+            if !state.submodules.is_empty() {
+                blockers.push("submodule_contents_not_captured".into());
+            }
+            if state.submodules.iter().any(|recorded| {
+                crate::capture::submodule_record(source, &recorded.path, &recorded.gitlink_commit)
+                    .ok()
+                    .as_ref()
+                    != Some(recorded)
+            }) {
+                blockers.push("submodule_checkout_changed_or_unavailable".into());
             }
         } else {
             blockers.push("historical_worktree_completeness_unknown".into());

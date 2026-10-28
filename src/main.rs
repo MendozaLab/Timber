@@ -31,6 +31,16 @@ struct Cli {
     /// Save the complete result (or editable consolidation plan) to a new JSON file.
     #[arg(long, global = true)]
     out: Option<PathBuf>,
+    /// Limit in seconds for each single Git operation (1 to 86400). A timeout leaves
+    /// the source untouched and the result partial, naming the operation.
+    #[arg(
+        long,
+        global = true,
+        value_name = "SECONDS",
+        default_value_t = timber_worktrees::git::DEFAULT_TIMEOUT_SECONDS,
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    git_timeout: u64,
     #[command(subcommand)]
     command: Commands,
 }
@@ -208,6 +218,7 @@ fn protect_output(output: Option<&Path>, roots: &[PathBuf]) -> Result<()> {
 }
 
 fn execute(cli: &Cli) -> Result<(Value, i32)> {
+    timber_worktrees::git::set_timeout_seconds(cli.git_timeout);
     let store_path = cli.store.clone().map(Ok).unwrap_or_else(default_store)?;
     let mut code = 0;
     let (command, result) = match &cli.command {

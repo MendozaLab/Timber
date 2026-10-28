@@ -373,6 +373,10 @@ fn render_inventory(body: &Value, html: &mut String) {
                 ("working_paths", "Working-file changes"),
                 ("untracked", "Untracked files"),
                 ("ignored", "Ignored files"),
+                (
+                    "submodules_recorded_not_captured",
+                    "Submodules recorded as pointers (contents not captured)",
+                ),
             ] {
                 if let Some(paths) = item.get(field).and_then(Value::as_array) {
                     let _ = write!(html, "<dt>{label}</dt><dd>{}</dd>", paths.len());
