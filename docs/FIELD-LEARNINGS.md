@@ -2,6 +2,14 @@
 
 Dated notes from running Timber on real repositories, kept so that what breaks or surprises in practice flows back into the tool. Each entry states what happened, what Timber did, and the smallest change that followed. Entries are genericized: no private paths, project names, filenames or report contents. The synthetic fixtures in `tests/` remain the regression record; this file records why they exist.
 
+## 2026-10-28: field acceptance of the three changes
+
+- **Submodules as pointers (acceptance passed).** The repository whose 31 worktrees were all refused the day before now checkpoints: one worktree captured and verified, with its vendored submodule recorded as `{gitlink_commit, checked_out_commit: null}` and nothing of its contents in the store.
+- **Operator-settable timeout (acceptance passed).** The largest root, partial the day before at the fixed 120 s limit, completed a full scan of 7 of 8 registered worktrees in 734 s with `--git-timeout 600`; the eighth is a registration on an unmounted volume, reported as absent, not pruned.
+- **Bounded output (acceptance passed).** The same 31-worktree repository that produced a 39 MB result on 2026-10-27 produced 1.8 MB under schema 2, and its 44 MB report became 2.2 MB, with identical staged, working and untracked counts. The largest root's result is 92 KB.
+- **Nested repositories (acceptance passed, with a correction).** `inspect` listed 91 nested repositories in the main checkout before `checkpoint` was attempted; 75 were disposable fixtures and 16 were the repository's own linked worktrees, which led to the linked-worktree classification. The main checkout is still uncaptured because background daemons write into it; the convention file proposal exists so those exclusions stop being retyped.
+- **Store reclamation (not yet available).** The 19 GB of incomplete objects was reclaimed by rebuilding the store: a fresh store, three re-captures verified, then the old store deleted. That is the manual form of what `timber gc` will do.
+
 ## 2026-10-27: first run on a large multi-worktree repository
 
 Setting: a 57 GB research monorepo with 31 registered worktrees spread across the main checkout, several agent-tool worktree directories, and dated folders elsewhere on the disk. Two further registrations pointed at folders under the system temporary directory that no longer existed. The run was driven by an AI coding agent under human approval, which is the use Timber was built for.

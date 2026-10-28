@@ -1,6 +1,6 @@
 # Product requirements: bounded output for large repositories
 
-Status: proposed 2026-10-27, not implemented. Source: `docs/FIELD-LEARNINGS.md`, 2026-10-27 entry.
+Status: implemented 2026-10-27; field acceptance passed 2026-10-28 (39 MB to 1.8 MB on the field case). Source: `docs/FIELD-LEARNINGS.md`, 2026-10-27 entry.
 
 ## Problem
 

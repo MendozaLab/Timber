@@ -21,4 +21,4 @@ Two people using Timber on one repository each pick a store, an exclusion list a
 
 ## Acceptance
 
-The three gates pass; on the field repository, a committed `timber.toml` with the four known exclusions lets `timber checkpoint <main checkout>` run without command-line flags and the manifest shows the exclusions as `from_convention_file`.
+The three gates pass; on the field repository, a committed `timber.toml` with the four known exclusions lets `timber checkpoint <main checkout>` run without command-line flags and the manifest shows the exclusions with reason `excluded_by_convention_file`.

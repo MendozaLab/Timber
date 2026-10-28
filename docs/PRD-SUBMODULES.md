@@ -1,6 +1,6 @@
 # Product requirements: capture around submodules, and an operator-settable Git timeout
 
-Status: implemented 2026-10-27 (proposed the same day). Source: `docs/FIELD-LEARNINGS.md`, "thirteen more repositories" entry.
+Status: implemented 2026-10-27; field acceptance passed 2026-10-28 (see docs/FIELD-LEARNINGS.md). Source: `docs/FIELD-LEARNINGS.md`, "thirteen more repositories" entry.
 
 ## Problem
 
