@@ -8,7 +8,7 @@ Timber is for the moment when several worktrees contain useful changes and you c
 
 [![Check](https://github.com/MendozaLab/Timber/actions/workflows/check.yml/badge.svg)](https://github.com/MendozaLab/Timber/actions/workflows/check.yml)
 
-**Experimental 0.1.0.** Formatting, strict Clippy and the test suite run on macOS and Linux in GitHub Actions on every push; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
+**Experimental 0.1.1.** Formatting, strict Clippy and the test suite run on macOS and Linux in GitHub Actions on every push; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
 
 The recovery workflow runs locally, without an AI provider, cloud account, or background service. A verified same-device checkpoint is not an independent backup.
 
