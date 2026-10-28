@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Read-only analysis of saved files and explicitly declared Git recovery data.
 //! Receipts describe producer claims. They never grant path access or cleanup authority.
 use crate::{

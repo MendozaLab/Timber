@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Capture supported state without staging, committing or cleaning the source.
 use crate::{
     fsx, git,

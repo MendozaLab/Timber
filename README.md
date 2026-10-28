@@ -8,7 +8,7 @@ Timber is for the moment when several worktrees contain useful changes and you c
 
 [![Check](https://github.com/MendozaLab/Timber/actions/workflows/check.yml/badge.svg)](https://github.com/MendozaLab/Timber/actions/workflows/check.yml)
 
-**Experimental 0.1.1.** Formatting, strict Clippy and the test suite run on macOS and Linux in GitHub Actions on every push; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
+**Experimental 0.2.0.** Formatting, strict Clippy and the test suite run on macOS and Linux in GitHub Actions on every push; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
 
 The recovery workflow runs locally, without an AI provider, cloud account, or background service. A verified same-device checkpoint is not an independent backup.
 
@@ -162,6 +162,8 @@ Further documentation: [user guide](docs/USER-GUIDE.md), [agent operator guide](
 
 ## License
 
-Licensed under either the [MIT license](LICENSE-MIT) or the [Apache License, Version 2.0](LICENSE-APACHE), at your option.
+Licensed under the [Apache License, Version 2.0](LICENSE-APACHE). Redistributions and derivative works must keep the attribution in [NOTICE](NOTICE). Versions 0.1.0 and 0.1.1 were released under MIT OR Apache-2.0 and remain available under those terms; from 0.2.0 on, Timber is Apache-2.0 only.
 
-Unless you explicitly state otherwise, contributions intentionally submitted for inclusion are offered under the same dual license.
+To cite Timber, use the "Cite this repository" button or [CITATION.cff](CITATION.cff). HTML reports and JSON results name the Timber version that produced them.
+
+Unless you explicitly state otherwise, contributions intentionally submitted for inclusion are offered under the Apache License, Version 2.0.

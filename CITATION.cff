@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use or build on Timber, please cite it as below."
+type: software
+title: "Timber: untangle dirty Git worktrees with verified checkpoints and isolated consolidation previews"
+authors:
+  - family-names: Mendoza
+    given-names: Kenneth A.
+    affiliation: MendozaLab
+    orcid: "https://orcid.org/0009-0000-9475-5938"
+version: 0.2.0
+date-released: 2026-10-27
+license: Apache-2.0
+repository-code: "https://github.com/MendozaLab/Timber"
+url: "https://github.com/MendozaLab/Timber"
+keywords:
+  - git
+  - git-worktree
+  - recovery
+  - ai-agents
+  - agentic-coding
+  - developer-tools

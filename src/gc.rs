@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Reclaim incomplete captures inside the store. Reachability from completed
 //! manifests governs every deletion; journals only attribute bytes to a run.
 //! Nothing outside the store root is read or written, and completed checkpoints

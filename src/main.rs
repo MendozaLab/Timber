@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -616,7 +618,7 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
             )
         }
     };
-    let envelope = json!({"schema":1,"command":command,"result":result});
+    let envelope = json!({"schema":1,"generator":generator(),"command":command,"result":result});
     if let Some(out) = &cli.out {
         // A consolidation plan is directly editable; other results keep their command envelope.
         let saved = if command == "plan" {
@@ -628,6 +630,10 @@ fn execute(cli: &Cli) -> Result<(Value, i32)> {
         write_new(out, &bytes)?;
     }
     Ok((envelope, code))
+}
+/// Identifies the producing tool in every JSON envelope; additive, the envelope schema stays 1.
+fn generator() -> serde_json::Value {
+    json!({"name":"Timber","version":env!("CARGO_PKG_VERSION"),"url":"https://github.com/MendozaLab/Timber"})
 }
 fn main() {
     let cli = Cli::parse();
@@ -655,7 +661,7 @@ fn main() {
             if cli.json {
                 eprintln!(
                     "{}",
-                    json!({"schema":1,"error":{"code":"OPERATION_FAILED","message":format!("{error:#}")}})
+                    json!({"schema":1,"generator":generator(),"error":{"code":"OPERATION_FAILED","message":format!("{error:#}")}})
                 );
             } else {
                 eprintln!("Timber stopped: {error:#}");

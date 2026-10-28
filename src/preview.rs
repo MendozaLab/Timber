@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Consolidation is performed only in a newly created independent repository.
 use crate::{capture::GITLINK_MODE, fsx, git, model::*, restore, store::Store};
 use anyhow::{Context, Result, bail, ensure};

@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Team convention file: `timber.toml` at the repository root.
 //!
 //! The file is committed so every person and agent on a repository uses the same

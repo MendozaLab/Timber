@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Portable recovery of explicitly declared Git history; source repositories stay read-only.
 use crate::{
     fsx, git,

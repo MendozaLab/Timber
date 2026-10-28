@@ -49,6 +49,8 @@ fn inspect_is_read_only_and_never_runs_clean_filters() {
         data["result"]["worktrees"][0]["working_paths"][0],
         "base.txt"
     );
+    assert_eq!(data["generator"]["name"], "Timber");
+    assert_eq!(data["generator"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(!sentinel.exists());
     assert_eq!(index, fs::read(r.join(".git/index")).unwrap());
     assert_eq!(before, fsx::inventory(&r).unwrap());

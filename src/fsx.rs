@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Exact supported filesystem state. Extraction never follows a stored symlink.
 use crate::model::{Entry, EntryKind};
 use anyhow::{Context, Result, bail, ensure};

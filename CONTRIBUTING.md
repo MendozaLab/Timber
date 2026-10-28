@@ -40,4 +40,4 @@ Exact Git and filesystem evidence governs recovery checks. Similarity, a success
 
 Original source repositories remain outside the preview workspace. Project code, hooks, content filters, and provider calls must not run automatically during preservation or consolidation.
 
-See the [architecture](docs/ARCHITECTURE.md), [safety boundaries](docs/SAFETY.md), and [supported-state matrix](docs/SUPPORTED-STATES.md) for the current contract. Contributions are offered under the repository's MIT-or-Apache-2.0 terms unless explicitly stated otherwise.
+See the [architecture](docs/ARCHITECTURE.md), [safety boundaries](docs/SAFETY.md), and [supported-state matrix](docs/SUPPORTED-STATES.md) for the current contract. Contributions are offered under the repository's Apache-2.0 terms (see [NOTICE](NOTICE)) unless explicitly stated otherwise.

@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Plans bind source order and selected layers to immutable checkpoints.
 use crate::{capture::GITLINK_MODE, fsx, git, model::*, preview, restore, store::Store};
 use anyhow::{Context, Result, ensure};

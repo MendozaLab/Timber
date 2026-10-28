@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 //! Immutable, hash-addressed checkpoint storage. No source repository is written.
 use crate::{
     fsx,

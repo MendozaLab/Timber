@@ -1,3 +1,5 @@
+// Copyright 2026 Kenneth A. Mendoza (MendozaLab). https://github.com/MendozaLab/Timber
+// SPDX-License-Identifier: Apache-2.0
 #![cfg_attr(not(unix), allow(unused))]
 #[cfg(not(unix))]
 compile_error!("Timber 0.1 supports macOS and Linux only");
