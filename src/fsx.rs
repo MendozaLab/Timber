@@ -254,8 +254,9 @@ pub fn inventory_filtered(root: &Path, include: impl Fn(&str) -> bool) -> Result
 }
 
 /// Like [`inventory_filtered`], but a pruned path is skipped entirely: no entry is
-/// recorded for it and a pruned directory is never read. Only explicit operator
-/// exclusions prune; a nested repository below an unpruned directory still refuses.
+/// recorded for it and a pruned directory is never read. Checkpoint prunes only
+/// gitlink paths, explicit operator exclusions and linked worktrees of the same
+/// repository; any other nested repository below an unpruned directory still refuses.
 pub fn inventory_pruned(
     root: &Path,
     prune: impl Fn(&str) -> bool,
@@ -344,11 +345,72 @@ pub fn inventory_pruned(
 /// at the directory that holds the `.git` entry. This uses the same name-based rule
 /// that makes capture refuse a nested repository, so inspection and checkpoint agree.
 pub fn nested_repositories(root: &Path) -> Result<Vec<String>> {
+    nested_walk(root, &|_| false)
+}
+
+/// One directory below a worktree that holds its own `.git` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NestedRepository {
+    /// Path relative to the worktree root.
+    pub path: String,
+    /// Registration name when the `.git` entry is a file that Git registered as a
+    /// linked worktree of this same repository (`<common dir>/worktrees/<name>`).
+    /// `None` means a foreign nested repository.
+    pub linked_worktree: Option<String>,
+}
+
+/// Like [`nested_repositories`], but classifies each one, and never descends into a
+/// directory for which `prune` (given the path relative to `root`) returns true.
+///
+/// A nested repository is a linked worktree of this repository only when all of these
+/// hold, and is foreign otherwise; nothing is guessed:
+/// - its `.git` is a regular file (not a directory or symbolic link) of at most 4096
+///   bytes holding exactly one line `gitdir: <path>`;
+/// - that path, absolute or relative to the folder, reaches an existing directory
+///   without passing through any symbolic link, and that directory is exactly
+///   `<canonical common dir>/worktrees/<name>`;
+/// - Git's own registration file `<common dir>/worktrees/<name>/gitdir` names this
+///   same `.git` file, again without passing through a symbolic link.
+///
+/// Only the two small pointer files are read; the nested folder's contents are not.
+pub fn classify_nested_repositories(
+    root: &Path,
+    common_dir: &Path,
+    prune: impl Fn(&str) -> bool,
+) -> Result<Vec<NestedRepository>> {
+    let found = nested_walk(root, &prune)?;
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = fs::canonicalize(root)?;
+    let worktrees = fs::canonicalize(common_dir)
+        .with_context(|| format!("resolve common Git directory {}", common_dir.display()))?
+        .join("worktrees");
+    Ok(found
+        .into_iter()
+        .map(|path| {
+            let linked_worktree = linked_worktree_name(&root.join(&path), &worktrees);
+            NestedRepository {
+                path,
+                linked_worktree,
+            }
+        })
+        .collect())
+}
+
+fn nested_walk(root: &Path, prune: &dyn Fn(&str) -> bool) -> Result<Vec<String>> {
     let meta = fs::symlink_metadata(root)?;
     ensure!(
         meta.is_dir() && !meta.file_type().is_symlink(),
         "source root must be a real directory"
     );
+    let relative = |path: &Path| -> Result<String> {
+        Ok(path
+            .strip_prefix(root)?
+            .to_str()
+            .context("non-UTF-8 paths unsupported in version one")?
+            .to_owned())
+    };
     let mut found = Vec::new();
     let mut pending = vec![root.to_path_buf()];
     while let Some(dir) = pending.pop() {
@@ -356,12 +418,7 @@ pub fn nested_repositories(root: &Path) -> Result<Vec<String>> {
             .with_context(|| format!("read directory {}", dir.display()))?
             .collect::<std::io::Result<Vec<_>>>()?;
         if dir != root && items.iter().any(|item| item.file_name() == ".git") {
-            found.push(
-                dir.strip_prefix(root)?
-                    .to_str()
-                    .context("non-UTF-8 paths unsupported in version one")?
-                    .to_owned(),
-            );
+            found.push(relative(&dir)?);
             continue;
         }
         for item in items {
@@ -369,13 +426,92 @@ pub fn nested_repositories(root: &Path) -> Result<Vec<String>> {
                 continue;
             }
             // DirEntry::file_type does not follow symbolic links.
-            if item.file_type()?.is_dir() {
+            if item.file_type()?.is_dir() && !prune(&relative(&item.path())?) {
                 pending.push(item.path());
             }
         }
     }
     found.sort();
     Ok(found)
+}
+
+/// Largest Git pointer file read during classification.
+const POINTER_FILE_LIMIT: u64 = 4096;
+
+/// Bytes of a small regular file, opened without following a symbolic link. `None`
+/// when the file is absent, unreadable, not regular, a cloud placeholder, too large,
+/// or replaced while opening.
+fn read_pointer_file(path: &Path) -> Option<Vec<u8>> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > POINTER_FILE_LIMIT || is_placeholder(&meta) {
+        return None;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let opened = file.metadata().ok()?;
+    if !opened.is_file() || opened.ino() != meta.ino() || opened.dev() != meta.dev() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(POINTER_FILE_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= POINTER_FILE_LIMIT).then_some(bytes)
+}
+
+/// The single non-empty line of a pointer file, with at most one trailing newline.
+fn pointer_line(bytes: &[u8]) -> Option<&str> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    (!text.is_empty() && !text.contains(['\n', '\r', '\0'])).then_some(text)
+}
+
+/// Resolves a path named in a pointer file, absolute or relative to the canonical
+/// directory `base`. Returns it only when it exists and was reached without passing
+/// through a symbolic link: the lexical resolution of `.` and `..` must equal the
+/// canonical path.
+fn resolve_without_links(base: &Path, named: &str) -> Option<std::path::PathBuf> {
+    let joined = base.join(named);
+    let mut lexical = std::path::PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::RootDir => lexical.push("/"),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !lexical.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(name) => lexical.push(name),
+            Component::Prefix(_) => return None,
+        }
+    }
+    let canonical = fs::canonicalize(&joined).ok()?;
+    (canonical == lexical).then_some(canonical)
+}
+
+/// Registration name of the linked worktree at the canonical directory `holder`, or
+/// `None` when its `.git` is not provably registered under `worktrees` (the canonical
+/// `<common dir>/worktrees`). See [`classify_nested_repositories`].
+fn linked_worktree_name(holder: &Path, worktrees: &Path) -> Option<String> {
+    let dot_git = holder.join(".git");
+    let pointer = read_pointer_file(&dot_git)?;
+    let named = pointer_line(&pointer)?.strip_prefix("gitdir: ")?;
+    let admin = resolve_without_links(holder, named)?;
+    if admin.parent()? != worktrees {
+        return None;
+    }
+    let name = admin.file_name()?.to_str()?.to_owned();
+    let meta = fs::symlink_metadata(&admin).ok()?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return None;
+    }
+    let registration = read_pointer_file(&admin.join("gitdir"))?;
+    let registered = resolve_without_links(&admin, pointer_line(&registration)?)?;
+    (registered == dot_git).then_some(name)
 }
 
 pub fn ensure_outside(child: &Path, source: &Path) -> Result<()> {

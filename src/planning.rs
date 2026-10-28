@@ -317,17 +317,18 @@ pub fn assess(store: &Store, plan: &Plan) -> Result<serde_json::Value> {
             .filter(|e| e.kind != EntryKind::Directory)
             .map(|e| e.path.as_str())
             .collect();
-        // Operator exclusions are declared paths, not ignored-file omissions.
+        // Operator exclusions and linked worktrees are declared folders skipped as a
+        // whole, not ignored-file omissions; the rescan prunes them the same way.
         let expected_omissions: BTreeSet<_> = manifest
             .excluded
             .iter()
-            .filter(|e| e.reason != EXCLUDED_BY_OPERATOR)
+            .filter(|e| !is_skipped_folder(&e.reason))
             .map(|e| e.path.as_str())
             .collect();
         let operator: BTreeSet<_> = manifest
             .excluded
             .iter()
-            .filter(|e| e.reason == EXCLUDED_BY_OPERATOR)
+            .filter(|e| is_skipped_folder(&e.reason))
             .map(|e| e.path.as_str())
             .collect();
         if let Ok(names) = &ignored {

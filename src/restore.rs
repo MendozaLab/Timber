@@ -2,7 +2,10 @@
 use crate::{
     capture::{GITLINK_MODE, read_index},
     fsx, git,
-    model::{EXCLUDED_BY_OPERATOR, EntryKind, Manifest, SCHEMA, Verification},
+    model::{
+        EXCLUDED_BY_OPERATOR, EntryKind, LINKED_WORKTREE_CAPTURED_SEPARATELY, Manifest, SCHEMA,
+        Verification,
+    },
     store::Store,
 };
 use anyhow::{Context, Result, ensure};
@@ -260,6 +263,18 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
             excluded_by_operator.len()
         ));
     }
+    let linked_worktrees_captured_separately = manifest
+        .excluded
+        .iter()
+        .filter(|x| x.reason == LINKED_WORKTREE_CAPTURED_SEPARATELY)
+        .map(|x| x.path.clone())
+        .collect::<Vec<_>>();
+    if !linked_worktrees_captured_separately.is_empty() {
+        notes.push(format!(
+            "{} linked worktrees of this repository sat inside the worktree and were skipped at checkpoint time; their folders are absent from this checkpoint and from any restore. Checkpoint each linked worktree on its own. See linked_worktrees_captured_separately.",
+            linked_worktrees_captured_separately.len()
+        ));
+    }
     if manifest.source_kind == "folder" {
         notes.push("Folder import verifies files present at import time; historical receipts remain producer claims, not proof of former worktree completeness.".into());
     }
@@ -286,6 +301,7 @@ fn check_restored(store: &Store, manifest: &Manifest, to: &Path) -> Result<Verif
         .into(),
         independent_backup: "unassessed".into(),
         excluded_by_operator,
+        linked_worktrees_captured_separately,
         submodules_recorded_not_captured: submodules,
         notes,
     })

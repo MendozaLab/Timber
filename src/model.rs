@@ -11,6 +11,15 @@ pub const INSPECT_SCHEMA: u32 = 2;
 /// `Exclusion::reason` for a path the operator named with `checkpoint --exclude`.
 /// Declared per run; never remembered or inferred.
 pub const EXCLUDED_BY_OPERATOR: &str = "excluded_by_operator";
+/// `Exclusion::reason` for a folder below the worktree that Git registered as a linked
+/// worktree of this same repository. Checkpoint skips it automatically; it is
+/// captured by checkpointing that worktree on its own.
+pub const LINKED_WORKTREE_CAPTURED_SEPARATELY: &str = "linked_worktree_captured_separately";
+/// True for exclusion reasons that name a declared folder skipped as a whole (operator
+/// exclusions and linked worktrees), as opposed to ignored-file omissions.
+pub fn is_skipped_folder(reason: &str) -> bool {
+    reason == EXCLUDED_BY_OPERATOR || reason == LINKED_WORKTREE_CAPTURED_SEPARATELY
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
@@ -196,6 +205,10 @@ pub struct Verification {
     /// Defaults to empty so verification records written before this field still load.
     #[serde(default)]
     pub excluded_by_operator: Vec<String>,
+    /// Linked worktrees of this repository found below the captured worktree and skipped
+    /// automatically; each is captured by checkpointing it on its own. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linked_worktrees_captured_separately: Vec<String>,
     /// Submodule pointers recorded by the checkpoint. Their contents were not captured;
     /// restore recreates each path as an empty directory. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

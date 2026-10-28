@@ -252,12 +252,13 @@ pub fn worktree(path: &Path) -> Result<Value> {
         .filter(|(_, (mode, _))| mode == crate::capture::GITLINK_MODE)
         .map(|(p, _)| p.as_str())
         .collect();
+    let mut linked_worktrees_inside = Vec::new();
     let nested_scan_complete = match nested_repository_blocker(path, &index, &base, &gitlinks) {
-        Ok(Some(blocker)) => {
-            blockers.push(blocker);
+        Ok((blocker, linked)) => {
+            blockers.extend(blocker);
+            linked_worktrees_inside = linked;
             true
         }
-        Ok(None) => true,
         Err(error) => {
             blockers.push(
                 format!("Nested repository scan unavailable; checkpoint may refuse this worktree: {error:#}")
@@ -278,7 +279,7 @@ pub fn worktree(path: &Path) -> Result<Value> {
         "path":path,"kind":"registered_worktree","inspection_status":if unknown.is_empty() && unknown_metadata.is_empty() && git_identity_stable && nested_scan_complete {"scanned"}else{"partial"},
         "head":head,"staged_paths":staged,"working_paths":working,"unknown_working_paths":unknown,
         "untracked":untracked,"ignored":ignored,"unknown_metadata_paths":unknown_metadata,
-        "blockers":blockers,"submodules_recorded_not_captured":submodules,"git_identity_stable":git_identity_stable,"writer_exclusion_enforced":false,
+        "blockers":blockers,"linked_worktrees_inside":linked_worktrees_inside,"submodules_recorded_not_captured":submodules,"git_identity_stable":git_identity_stable,"writer_exclusion_enforced":false,
         "statistics":{"index_paths":index.len(),"git_blob_objects_requested":requested.len(),"unique_index_blob_objects":unique_count,"cat_file_batch_processes":usize::from(!requested.is_empty()),"working_files_compared":compared,"elapsed_seconds":started.elapsed().as_secs_f64()},
         "note":"Working differences compare raw bytes without clean filters or index refresh. Per-file stable reads and unchanged HEAD/index do not establish a frozen snapshot or permission to clean up."
     }))
@@ -290,23 +291,36 @@ pub const NESTED_REPOSITORIES_MESSAGE: &str =
 
 /// Lists every nested repository below the worktree (a directory holding its own
 /// `.git` directory or file) other than a submodule at a gitlink path, without
-/// reading its contents, and classifies each path
-/// as tracked, ignored or untracked. Classification spends one Git process, and only
-/// when a nested repository exists.
+/// reading its contents, and classifies each path as tracked, ignored or untracked.
+/// Classification spends one Git process for the common directory and one for
+/// ignore rules, and only when a nested repository exists.
+///
+/// Returns the blocker for foreign nested repositories (none when there are none) and
+/// the linked worktrees of this repository found inside the worktree. A linked
+/// worktree is reported separately and is not a blocker, because checkpoint skips it
+/// and records it as `linked_worktree_captured_separately`. A linked worktree whose
+/// folder holds tracked paths of this worktree cannot be skipped and stays a blocker.
 fn nested_repository_blocker(
     root: &Path,
     index: &BTreeMap<String, (String, String)>,
     base: &BTreeMap<String, (String, String)>,
     gitlinks: &BTreeSet<&str>,
-) -> Result<Option<Value>> {
+) -> Result<(Option<Value>, Vec<Value>)> {
     // A repository at a gitlink path is a submodule, recorded as a pointer by
     // checkpoint; it is reported under `submodules_recorded_not_captured` instead.
-    let found = fsx::nested_repositories(root)?
+    if fsx::nested_repositories(root)?
+        .iter()
+        .all(|r| gitlinks.contains(r.as_str()))
+    {
+        return Ok((None, Vec::new()));
+    }
+    let common = git::common_dir(root)?;
+    let found = fsx::classify_nested_repositories(root, &common, |_| false)?
         .into_iter()
-        .filter(|r| !gitlinks.contains(r.as_str()))
+        .filter(|r| !gitlinks.contains(r.path.as_str()))
         .collect::<Vec<_>>();
     if found.is_empty() {
-        return Ok(None);
+        return Ok((None, Vec::new()));
     }
     let covers = |repository: &str, path: &str| {
         path == repository
@@ -316,11 +330,12 @@ fn nested_repository_blocker(
     };
     let tracked = found
         .iter()
+        .map(|r| r.path.as_str())
         .filter(|r| index.keys().chain(base.keys()).any(|p| covers(r, p)))
         .collect::<BTreeSet<_>>();
     let mut input = Vec::new();
-    for repository in found.iter().filter(|r| !tracked.contains(r)) {
-        input.extend_from_slice(repository.as_bytes());
+    for repository in found.iter().filter(|r| !tracked.contains(r.path.as_str())) {
+        input.extend_from_slice(repository.path.as_bytes());
         input.push(0);
     }
     let mut ignored = BTreeSet::new();
@@ -338,23 +353,34 @@ fn nested_repository_blocker(
                 .insert(String::from_utf8(record.to_vec()).context("non-UTF-8 path unsupported")?);
         }
     }
-    let repositories = found
-        .iter()
-        .map(|r| {
-            let tracking = if tracked.contains(r) {
-                "tracked"
-            } else if ignored.contains(r) {
-                "ignored"
-            } else {
-                "untracked"
-            };
-            json!({"path":r,"tracking":tracking})
+    let mut repositories = Vec::new();
+    let mut linked = Vec::new();
+    for repository in &found {
+        let path = repository.path.as_str();
+        let tracking = if tracked.contains(path) {
+            "tracked"
+        } else if ignored.contains(path) {
+            "ignored"
+        } else {
+            "untracked"
+        };
+        match &repository.linked_worktree {
+            Some(name) if tracking != "tracked" => {
+                linked.push(json!({"path":path,"registration":name,"tracking":tracking}));
+            }
+            Some(name) => {
+                repositories.push(json!({"path":path,"tracking":tracking,"linked_worktree":name}))
+            }
+            None => repositories.push(json!({"path":path,"tracking":tracking})),
+        }
+    }
+    let blocker = (!repositories.is_empty()).then(|| {
+        json!({
+            "kind":"nested_repositories","message":NESTED_REPOSITORIES_MESSAGE,"count":repositories.len(),"repositories":repositories,
+            "remedy":"Handle each nested repository separately, or name a disposable untracked or ignored folder with checkpoint --exclude for that run."
         })
-        .collect::<Vec<_>>();
-    Ok(Some(json!({
-        "kind":"nested_repositories","message":NESTED_REPOSITORIES_MESSAGE,"count":found.len(),"repositories":repositories,
-        "remedy":"Handle each nested repository separately, or name a disposable untracked or ignored folder with checkpoint --exclude for that run."
-    })))
+    });
+    Ok((blocker, linked))
 }
 
 fn registrations(data: &[u8]) -> Result<Vec<BTreeMap<String, String>>> {

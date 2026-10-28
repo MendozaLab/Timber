@@ -403,6 +403,53 @@ fn operator_exclusions(
     Ok(selectors)
 }
 
+/// Linked worktrees of this repository below `source`, by relative path, that
+/// checkpoint skips automatically. The walk does not enter operator exclusions or
+/// gitlink paths. A linked worktree whose folder holds a tracked path of this
+/// worktree is refused, naming it, because a missing tracked working copy would read
+/// as a deletion; an operator exclusion strictly inside a linked worktree is refused
+/// because that folder is skipped as a whole. Foreign nested repositories are not
+/// returned; the capture walk refuses them.
+fn linked_worktrees_inside(
+    source: &Path,
+    operator: &[String],
+    gitlinks: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let skipped = |p: &str| gitlinks.contains(p) || operator.iter().any(|x| x == p);
+    let candidates = fsx::nested_repositories(source)?;
+    if candidates.iter().all(|p| skipped(p)) {
+        return Ok(BTreeMap::new());
+    }
+    let common = git::common_dir(source)?;
+    let linked = fsx::classify_nested_repositories(source, &common, skipped)?
+        .into_iter()
+        .filter(|r| !gitlinks.contains(&r.path))
+        .filter_map(|r| r.linked_worktree.map(|name| (r.path, name)))
+        .collect::<BTreeMap<_, _>>();
+    if linked.is_empty() {
+        return Ok(linked);
+    }
+    let index = crate::inspect::index(source)?;
+    let head = crate::inspect::head_tree(source)?;
+    for (path, name) in &linked {
+        let scope = std::slice::from_ref(path);
+        if let Some(tracked) = index.keys().chain(head.keys()).find(|p| included(p, scope)) {
+            bail!(
+                "linked worktree {path} (registration {name}) holds tracked path {tracked}; checkpoint cannot skip it"
+            );
+        }
+        if let Some(inner) = operator
+            .iter()
+            .find(|x| x.as_str() != path && included(x, scope))
+        {
+            bail!(
+                "--exclude {inner} lies inside linked worktree {path} (registration {name}), which checkpoint skips as a whole; name the folder or nothing"
+            );
+        }
+    }
+    Ok(linked)
+}
+
 fn persist_entries(store: &Store, source: &Path, entries: &[Entry]) -> Result<()> {
     for entry in entries {
         if matches!(entry.kind, EntryKind::File | EntryKind::Symlink) {
@@ -431,8 +478,10 @@ pub fn checkpoint(
 }
 
 /// Capture with explicit per-run operator exclusions (`checkpoint --exclude`). Each
-/// excluded path is skipped entirely and recorded as `excluded_by_operator`. Without
-/// exclusions this is exactly [`checkpoint`]: a nested repository still refuses.
+/// excluded path is skipped entirely and recorded as `excluded_by_operator`. A linked
+/// worktree of this same repository below the worktree is skipped automatically and
+/// recorded as `linked_worktree_captured_separately`. Without exclusions this is
+/// exactly [`checkpoint`]: a foreign nested repository still refuses.
 pub fn checkpoint_with_exclusions(
     store: &Store,
     path: &Path,
@@ -444,6 +493,14 @@ pub fn checkpoint_with_exclusions(
     fsx::ensure_outside(&store.root, &source)?;
     validate_worktree(&source)?;
     let operator = operator_exclusions(&source, exclude, include_ignored)?;
+    // Linked worktrees of this repository are skipped as whole folders and recorded;
+    // foreign nested repositories still refuse during the capture walk.
+    let gitlinks_now = read_index(&source)?
+        .into_iter()
+        .filter(|(_, mode, _)| mode == GITLINK_MODE)
+        .map(|(path, _, _)| path)
+        .collect::<BTreeSet<_>>();
+    let linked = linked_worktrees_inside(&source, &operator, &gitlinks_now)?;
     let pruned = std::cell::RefCell::new(BTreeSet::new());
     let prune = |p: &str| {
         let hit = operator.iter().find(|x| x.as_str() == p);
@@ -472,8 +529,11 @@ pub fn checkpoint_with_exclusions(
         .map(|s| s.path.clone())
         .collect::<BTreeSet<_>>();
     let scan = |include: &dyn Fn(&str) -> bool| -> Result<Vec<Entry>> {
-        let mut entries =
-            fsx::inventory_pruned(&source, |p| gitlinks.contains(p) || prune(p), include)?;
+        let mut entries = fsx::inventory_pruned(
+            &source,
+            |p| gitlinks.contains(p) || linked.contains_key(p) || prune(p),
+            include,
+        )?;
         entries.extend(submodules.iter().map(|s| Entry {
             path: s.path.clone(),
             kind: EntryKind::Submodule,
@@ -564,6 +624,10 @@ pub fn checkpoint_with_exclusions(
     );
     validate_worktree(&source)?;
     ensure!(
+        linked == linked_worktrees_inside(&source, &operator, &gitlinks)?,
+        "linked worktrees inside the worktree changed during capture"
+    );
+    ensure!(
         protected_roots == git::protected_roots(&source)?,
         "registered worktree or shared Git roots changed during capture"
     );
@@ -580,14 +644,19 @@ pub fn checkpoint_with_exclusions(
         .collect::<Result<Vec<_>>>()?;
     protected_roots.sort();
     protected_roots.dedup();
-    // Operator exclusions come first. Ignored omissions keep their own records, even
-    // below an excluded path, so later assessment compares like with like.
+    // Operator exclusions come first, then linked worktrees skipped automatically.
+    // Ignored omissions keep their own records, even below a skipped folder, so later
+    // assessment compares like with like.
     let excluded = operator
         .iter()
         .map(|path| Exclusion {
             path: path.clone(),
             reason: EXCLUDED_BY_OPERATOR.into(),
         })
+        .chain(linked.keys().map(|path| Exclusion {
+            path: path.clone(),
+            reason: LINKED_WORKTREE_CAPTURED_SEPARATELY.into(),
+        }))
         .chain(
             ignored
                 .into_iter()

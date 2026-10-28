@@ -172,6 +172,15 @@ pub fn init(path: &Path) -> Result<()> {
 }
 
 /// All source checkouts and shared metadata remain outside Timber write destinations.
+/// Absolute path of the repository's common Git directory, as Git reports it.
+pub fn common_dir(repo: &Path) -> Result<std::path::PathBuf> {
+    Ok(text(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )?
+    .into())
+}
+
 pub fn protected_roots(repo: &Path) -> Result<Vec<std::path::PathBuf>> {
     let mut roots = Vec::new();
     let data = run(repo, &["worktree", "list", "--porcelain", "-z"])?;
@@ -180,11 +189,7 @@ pub fn protected_roots(repo: &Path) -> Result<Vec<std::path::PathBuf>> {
             roots.push(std::path::PathBuf::from(std::str::from_utf8(value)?));
         }
     }
-    let common = text(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    roots.push(common.into());
+    roots.push(common_dir(repo)?);
     roots.sort();
     roots.dedup();
     Ok(roots)

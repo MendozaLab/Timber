@@ -377,6 +377,10 @@ fn render_inventory(body: &Value, html: &mut String) {
                     "submodules_recorded_not_captured",
                     "Submodules recorded as pointers (contents not captured)",
                 ),
+                (
+                    "linked_worktrees_inside",
+                    "Linked worktrees inside (skipped by checkpoint; capture each separately)",
+                ),
             ] {
                 if let Some(paths) = item.get(field).and_then(Value::as_array) {
                     let _ = write!(html, "<dt>{label}</dt><dd>{}</dd>", paths.len());
