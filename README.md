@@ -2,7 +2,7 @@
 
 **Untangle dirty worktrees. Keep the useful work.**
 
-Timber helps developers recover unfinished work scattered across Git worktrees and saved folders. Inspect what changed, preserve staged and working versions separately, and assemble selected changes in an independent consolidation preview.
+Parallel AI coding agents and rapid local experiments multiply Git worktrees faster than people can audit them. Timber helps developers recover unfinished work scattered across dirty Git worktrees and saved folders, without spending model tokens on raw diff inspection or trusting an agent with destructive cleanup commands. Inspect what changed, preserve staged and working versions separately, and assemble selected changes in an independent consolidation preview.
 
 Timber is for the moment when several worktrees contain useful changes and you can no longer confidently answer: *what is unique, what has already landed, and what can I safely put aside?*
 
@@ -11,6 +11,17 @@ Timber is for the moment when several worktrees contain useful changes and you c
 **Experimental 0.1.1.** Formatting, strict Clippy and the test suite run on macOS and Linux in GitHub Actions on every push; Windows is unsupported. Start with read-only inspection and review the [supported states](docs/SUPPORTED-STATES.md) before relying on a checkpoint.
 
 The recovery workflow runs locally, without an AI provider, cloud account, or background service. A verified same-device checkpoint is not an independent backup.
+
+## Why dirty worktrees pile up in agentic coding
+
+Each parallel agent session or quick experiment usually gets its own worktree, and many finish with uncommitted changes. The cleanup that should follow tends to stall for four reasons:
+
+- **Cleanup refuses dirty folders.** `git worktree remove` declines a worktree with modified or untracked files unless you add `--force`, which discards them. Without a way to see what each one holds, the safe choice is to leave it.
+- **Build output multiplies.** Every stranded worktree keeps its own `target/`, `node_modules/` or `.venv/`, so disk use grows with the worktree count even when the source changes are small.
+- **Agent cleanup is expensive and risky.** Asking a coding agent to triage means feeding it `git status` and `git diff` for every worktree, which floods its context, and then trusting it near commands such as `git worktree remove --force`, `git clean` or `git reset --hard`.
+- **The truth is split across layers.** One change can exist as a commit, a staged version, a different working-file version and a copy in a saved folder. Similar filenames or patches do not show which version is current or unique.
+
+Timber handles the inspection deterministically and locally. It calls no model, so the triage itself spends no tokens; an agent driving it reads one structured result, with large ignored-path lists summarized as counts, bytes and top folders, instead of raw diffs. Timber has no command that moves, deletes or prunes, so every decision to discard work stays with a person.
 
 ## Evidence from real repositories
 
